@@ -1,170 +1,156 @@
-import fs from "node:fs";
-import path from "node:path";
-import { createHmac, scryptSync } from "node:crypto";
-import { Keypair } from "@solana/web3.js";
-import { config } from "./config.js";
+import {
+  Keypair,
+  PublicKey,
+  TransactionInstruction,
+} from "@solana/web3.js";
+
+import {
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
+  createBurnCheckedInstruction,
+  createTransferCheckedInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+
+import * as sol from "./solana.js";
+
+export async function tokenProgramOf(
+  mint: PublicKey
+): Promise<PublicKey> {
+  const info = await sol.withRetry(() =>
+    sol.connection.getAccountInfo(mint)
+  );
+
+  if (!info) {
+    throw new Error("Account not found");
+  }
+
+  if (
+    !info.owner.equals(TOKEN_PROGRAM_ID) &&
+    !info.owner.equals(TOKEN_2022_PROGRAM_ID)
+  ) {
+    throw new Error("Address is not a token mint");
+  }
+
+  return info.owner;
+}
 
 /**
- * Wallet keys are DERIVED from WALLET_STORE_KEY + an index, never stored.
- * If the registry file is lost, every wallet is recoverable with /recover <count>.
+ * Send tokens from `from`'s associated token account
+ * to each target.
+ *
+ * Destination ATAs are created idempotently.
  */
-export type Group = "treasury" | "chusi";
-export interface WalletPublic {
-  id: string;
-  group: Group;
-  publicKey: string;
-  index: number;
-}
-export interface Position {
-  spent: string; // lamports invested
-  realized: string; // estimated lamports returned from sells
-  entryMcap?: string; // market cap (lamports) at first recorded buy
-}
-export interface SourceInfo {
-  id: string;
-  group: Group | "master";
-  publicKey: string;
-}
-export interface CoinRec {
-  mint: string;
-  name: string;
-  symbol: string;
-  image?: string; // local file (relative to data dir) or https URL
-  createdAt: string;
-}
-interface WalletRec extends WalletPublic {
-  index: number;
-  createdAt: string;
-}
-interface Data {
-  nextIndex: number;
-  nextW: number;
-  nextC: number;
-  wallets: WalletRec[];
-  coins: CoinRec[];
-  positions: Record<string, Position>;
-}
+export async function distribute(
+  mint: PublicKey,
+  from: Keypair,
+  targets: Array<{
+    owner: PublicKey;
+    amount: bigint;
+  }>,
+  decimals: number
+): Promise<string[]> {
+  const program: PublicKey =
+    await tokenProgramOf(mint);
 
-const root = scryptSync(config.storeKey, "materbabe-wallet-derivation-v1", 32);
-const file = path.join(config.dataDir, "registry.json");
-let data: Data = { nextIndex: 0, nextW: 1, nextC: 1, wallets: [], coins: [], positions: {} };
+  const sourceAta: PublicKey =
+    getAssociatedTokenAddressSync(
+      mint,
+      from.publicKey,
+      true,
+      program
+    );
 
-function derive(index: number): Keypair {
-  return Keypair.fromSeed(createHmac("sha256", root).update(`wallet:${index}`).digest());
-}
+  const signatures: string[] = [];
 
-export function loadStore(): void {
-  if (!fs.existsSync(file)) {
-    console.warn("No registry file yet (new install, or the disk was reset). Use /recover <count> if you had wallets.");
-    return;
-  }
-  const raw = fs.readFileSync(file, "utf8");
-  if (raw.trim() === "") return;
-  try {
-    data = JSON.parse(raw) as Data;
-    data.positions ??= {};
-    data.coins ??= [];
-  } catch {
-    throw new Error("registry.json is corrupt. Not overwriting it; fix or move the file (a .bak copy may exist).");
-  }
-}
+  for (let i = 0; i < targets.length; i += 4) {
+    const instructions: TransactionInstruction[] = [];
 
-function save(): void {
-  fs.mkdirSync(config.dataDir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data));
-  if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
-  fs.renameSync(tmp, file);
-}
+    const batch = targets.slice(i, i + 4);
 
-function add(group: Group, index: number): WalletRec {
-  const id = group === "chusi" ? `C${data.nextC++}` : `W${data.nextW++}`;
-  const rec: WalletRec = {
-    id,
-    group,
-    index,
-    publicKey: derive(index).publicKey.toBase58(),
-    createdAt: new Date().toISOString(),
-  };
-  data.wallets.push(rec);
-  return rec;
-}
+    for (const target of batch) {
+      const destinationAta: PublicKey =
+        getAssociatedTokenAddressSync(
+          mint,
+          target.owner,
+          true,
+          program
+        );
 
-export function createWallets(group: Group, count: number): WalletPublic[] {
-  const made: WalletPublic[] = [];
-  for (let i = 0; i < count; i++) {
-    const r = add(group, data.nextIndex++);
-    made.push({ id: r.id, group: r.group, publicKey: r.publicKey, index: r.index });
-  }
-  save();
-  return made;
-}
+      instructions.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          from.publicKey,
+          destinationAta,
+          target.owner,
+          mint,
+          program
+        )
+      );
 
-/** Re-register derived wallets 0..count-1 that are missing from the registry (as treasury). */
-export function recoverRange(count: number): number {
-  let added = 0;
-  const have = new Set(data.wallets.map((w) => w.index));
-  for (let i = 0; i < count; i++) {
-    if (!have.has(i)) {
-      add("treasury", i);
-      added++;
+      instructions.push(
+        createTransferCheckedInstruction(
+          sourceAta,
+          mint,
+          destinationAta,
+          from.publicKey,
+          target.amount,
+          decimals,
+          [],
+          program
+        )
+      );
     }
+
+    const signature: string =
+      await sol.sendTx(instructions, [from]);
+
+    signatures.push(signature);
   }
-  data.nextIndex = Math.max(data.nextIndex, count);
-  save();
-  return added;
+
+  return signatures;
 }
 
-export function getWallets(group?: Group): WalletPublic[] {
-  return data.wallets
-    .filter((w) => !group || w.group === group)
-    .map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey, index: w.index }));
-}
+/**
+ * Burn tokens from a wallet's associated token account.
+ *
+ * `feePayer` can optionally pay the transaction fee.
+ */
+export async function burn(
+  mint: PublicKey,
+  wallet: Keypair,
+  amount: bigint,
+  decimals: number,
+  feePayer?: Keypair
+): Promise<string> {
+  const program: PublicKey =
+    await tokenProgramOf(mint);
 
-export function getWallet(id: string): WalletPublic | undefined {
-  return getWallets().find((w) => w.id === id);
-}
+  const tokenAccount: PublicKey =
+    getAssociatedTokenAddressSync(
+      mint,
+      wallet.publicKey,
+      true,
+      program
+    );
 
-/** Master ("M") or any derived wallet. Never display the result. */
-export function signerFor(id: string): Keypair | undefined {
-  if (id === "M") return config.master;
-  const r = data.wallets.find((w) => w.id === id);
-  if (!r) return undefined;
-  const kp = derive(r.index);
-  if (kp.publicKey.toBase58() !== r.publicKey) {
-    throw new Error("WALLET_STORE_KEY does not match this wallet. Was it changed?");
-  }
-  return kp;
-}
+  const instruction: TransactionInstruction =
+    createBurnCheckedInstruction(
+      tokenAccount,
+      mint,
+      wallet.publicKey,
+      amount,
+      decimals,
+      [],
+      program
+    );
 
-export function allSources(): SourceInfo[] {
-  return [
-    { id: "M", group: "master", publicKey: config.master.publicKey.toBase58() },
-    ...getWallets().map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey })),
-  ];
-}
+  const signers: Keypair[] = feePayer
+    ? [feePayer, wallet]
+    : [wallet];
 
-export function addCoin(c: Omit<CoinRec, "createdAt">): void {
-  data.coins.push({ ...c, createdAt: new Date().toISOString() });
-  save();
-}
-export function getCoins(): CoinRec[] {
-  return data.coins;
-}
+  const signature: string =
+    await sol.sendTx(instruction ? [instruction] : [], signers);
 
-export function getPosition(mint: string): Position | undefined {
-  return data.positions[mint];
-}
-export function addSpent(mint: string, lamports: bigint, entryMcap?: bigint): void {
-  const p = data.positions[mint] ?? { spent: "0", realized: "0" };
-  p.spent = (BigInt(p.spent) + lamports).toString();
-  if (!p.entryMcap && entryMcap !== undefined) p.entryMcap = entryMcap.toString();
-  data.positions[mint] = p;
-  save();
-}
-export function addRealized(mint: string, lamports: bigint): void {
-  const p = data.positions[mint] ?? { spent: "0", realized: "0" };
-  p.realized = (BigInt(p.realized) + lamports).toString();
-  data.positions[mint] = p;
-  save();
+  return signature;
 }
