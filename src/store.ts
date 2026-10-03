@@ -54,7 +54,18 @@ export function loadStore(): void {
     return;
   }
   const raw = fs.readFileSync(config.storePath, "utf8");
-  const parsed = JSON.parse(raw);
+  if (raw.trim() === "") {
+    console.warn("Wallet store file is empty; starting with no treasury wallets.");
+    return;
+  }
+  let parsed: { enc?: boolean };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      "Wallet store file is corrupt (not valid JSON). Not overwriting it; fix or move the file.",
+    );
+  }
   if (parsed.enc) {
     if (!config.storeKey) throw new Error("Wallet store is encrypted but WALLET_STORE_KEY is not set.");
     data = JSON.parse(decrypt(raw)) as StoreData;
