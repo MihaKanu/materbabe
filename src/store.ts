@@ -1,141 +1,143 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createHmac, scryptSync } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
-import bs58 from "bs58";
 import { config } from "./config.js";
 
-interface WalletRecord {
-  id: string;
-  publicKey: string;
-  secretKey: string; // base58; never sent to Telegram or logs
-  createdAt: string;
-}
-interface StoreData {
-  nextId: number;
-  wallets: WalletRecord[];
-}
+/**
+ * Wallet keys are DERIVED from WALLET_STORE_KEY + an index, never stored.
+ * If the registry file is lost, every wallet is recoverable with /recover <count>.
+ */
+export type Group = "treasury" | "chusi";
 export interface WalletPublic {
   id: string;
+  group: Group;
   publicKey: string;
 }
-
-let data: StoreData = { nextId: 1, wallets: [] };
-
-function encrypt(plain: string): string {
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  const key = scryptSync(config.storeKey, salt, 32);
-  const c = createCipheriv("aes-256-gcm", key, iv);
-  const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
-  return JSON.stringify({
-    v: 1,
-    enc: true,
-    salt: salt.toString("base64"),
-    iv: iv.toString("base64"),
-    tag: c.getAuthTag().toString("base64"),
-    ct: ct.toString("base64"),
-  });
+export interface SourceInfo {
+  id: string;
+  group: Group | "master";
+  publicKey: string;
+}
+export interface CoinRec {
+  mint: string;
+  name: string;
+  symbol: string;
+  createdAt: string;
+}
+interface WalletRec extends WalletPublic {
+  index: number;
+  createdAt: string;
+}
+interface Data {
+  nextIndex: number;
+  nextW: number;
+  nextC: number;
+  wallets: WalletRec[];
+  coins: CoinRec[];
 }
 
-function decrypt(file: string): string {
-  const o = JSON.parse(file);
-  const key = scryptSync(config.storeKey, Buffer.from(o.salt, "base64"), 32);
-  const d = createDecipheriv("aes-256-gcm", key, Buffer.from(o.iv, "base64"));
-  d.setAuthTag(Buffer.from(o.tag, "base64"));
-  return Buffer.concat([d.update(Buffer.from(o.ct, "base64")), d.final()]).toString("utf8");
+const root = scryptSync(config.storeKey, "materbabe-wallet-derivation-v1", 32);
+const file = path.join(config.dataDir, "registry.json");
+let data: Data = { nextIndex: 0, nextW: 1, nextC: 1, wallets: [], coins: [] };
+
+function derive(index: number): Keypair {
+  return Keypair.fromSeed(createHmac("sha256", root).update(`wallet:${index}`).digest());
 }
 
 export function loadStore(): void {
-  if (!fs.existsSync(config.storePath)) {
-    if (!config.storeKey) {
-      console.warn("WALLET_STORE_KEY not set: treasury keys will be stored UNENCRYPTED.");
-    }
+  if (!fs.existsSync(file)) {
+    console.warn("No registry file yet (new install, or the disk was reset). Use /recover <count> if you had wallets.");
     return;
   }
-  const raw = fs.readFileSync(config.storePath, "utf8");
-  if (raw.trim() === "") {
-    console.warn("Wallet store file is empty; starting with no treasury wallets.");
-    return;
-  }
-  let parsed: { enc?: boolean };
+  const raw = fs.readFileSync(file, "utf8");
+  if (raw.trim() === "") return;
   try {
-    parsed = JSON.parse(raw);
+    data = JSON.parse(raw) as Data;
   } catch {
-    throw new Error(
-      "Wallet store file is corrupt (not valid JSON). Not overwriting it; fix or move the file.",
-    );
-  }
-  if (parsed.enc) {
-    if (!config.storeKey) throw new Error("Wallet store is encrypted but WALLET_STORE_KEY is not set.");
-    data = JSON.parse(decrypt(raw)) as StoreData;
-  } else {
-    data = parsed as StoreData;
+    throw new Error("registry.json is corrupt. Not overwriting it; fix or move the file (a .bak copy may exist).");
   }
 }
 
 function save(): void {
-  fs.mkdirSync(path.dirname(config.storePath), { recursive: true });
-  const body = JSON.stringify(data);
-  const out = config.storeKey ? encrypt(body) : body;
-  const tmp = `${config.storePath}.tmp`;
-  fs.writeFileSync(tmp, out, { mode: 0o600 });
-  fs.renameSync(tmp, config.storePath);
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
+  fs.renameSync(tmp, file);
 }
 
-export function createWallet(): WalletPublic {
-  const kp = Keypair.generate();
-  const rec: WalletRecord = {
-    id: `W${data.nextId++}`,
-    publicKey: kp.publicKey.toBase58(),
-    secretKey: bs58.encode(kp.secretKey),
+function add(group: Group, index: number): WalletRec {
+  const id = group === "chusi" ? `C${data.nextC++}` : `W${data.nextW++}`;
+  const rec: WalletRec = {
+    id,
+    group,
+    index,
+    publicKey: derive(index).publicKey.toBase58(),
     createdAt: new Date().toISOString(),
   };
   data.wallets.push(rec);
-  save();
-  return { id: rec.id, publicKey: rec.publicKey };
+  return rec;
 }
 
-export function createWallets(count: number): WalletPublic[] {
+export function createWallets(group: Group, count: number): WalletPublic[] {
   const made: WalletPublic[] = [];
   for (let i = 0; i < count; i++) {
-    const kp = Keypair.generate();
-    const rec: WalletRecord = {
-      id: `W${data.nextId++}`,
-      publicKey: kp.publicKey.toBase58(),
-      secretKey: bs58.encode(kp.secretKey),
-      createdAt: new Date().toISOString(),
-    };
-    data.wallets.push(rec);
-    made.push({ id: rec.id, publicKey: rec.publicKey });
+    const r = add(group, data.nextIndex++);
+    made.push({ id: r.id, group: r.group, publicKey: r.publicKey });
   }
   save();
   return made;
 }
 
-export function getWallets(): WalletPublic[] {
-  return data.wallets.map((w) => ({ id: w.id, publicKey: w.publicKey }));
+/** Re-register derived wallets 0..count-1 that are missing from the registry (as treasury). */
+export function recoverRange(count: number): number {
+  let added = 0;
+  const have = new Set(data.wallets.map((w) => w.index));
+  for (let i = 0; i < count; i++) {
+    if (!have.has(i)) {
+      add("treasury", i);
+      added++;
+    }
+  }
+  data.nextIndex = Math.max(data.nextIndex, count);
+  save();
+  return added;
+}
+
+export function getWallets(group?: Group): WalletPublic[] {
+  return data.wallets
+    .filter((w) => !group || w.group === group)
+    .map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey }));
 }
 
 export function getWallet(id: string): WalletPublic | undefined {
-  const w = data.wallets.find((x) => x.id === id);
-  return w ? { id: w.id, publicKey: w.publicKey } : undefined;
+  return getWallets().find((w) => w.id === id);
 }
 
-/** Internal use only, for signing. Never display the result. */
-export function getWalletKeypair(id: string): Keypair | undefined {
-  const w = data.wallets.find((x) => x.id === id);
-  return w ? Keypair.fromSecretKey(bs58.decode(w.secretKey)) : undefined;
-}
-
-/** Not exposed in Telegram. Caller must confirm and check balances first. */
-export function deleteWallet(id: string): boolean {
-  const w = data.wallets.find((x) => x.id === id);
-  if (!w) return false;
-  if (w.publicKey === config.master.publicKey.toBase58()) {
-    throw new Error("Refusing to delete the master wallet.");
+/** Master ("M") or any derived wallet. Never display the result. */
+export function signerFor(id: string): Keypair | undefined {
+  if (id === "M") return config.master;
+  const r = data.wallets.find((w) => w.id === id);
+  if (!r) return undefined;
+  const kp = derive(r.index);
+  if (kp.publicKey.toBase58() !== r.publicKey) {
+    throw new Error("WALLET_STORE_KEY does not match this wallet. Was it changed?");
   }
-  data.wallets = data.wallets.filter((x) => x.id !== id);
+  return kp;
+}
+
+export function allSources(): SourceInfo[] {
+  return [
+    { id: "M", group: "master", publicKey: config.master.publicKey.toBase58() },
+    ...getWallets().map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey })),
+  ];
+}
+
+export function addCoin(c: Omit<CoinRec, "createdAt">): void {
+  data.coins.push({ ...c, createdAt: new Date().toISOString() });
   save();
-  return true;
+}
+export function getCoins(): CoinRec[] {
+  return data.coins;
 }
