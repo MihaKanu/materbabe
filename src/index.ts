@@ -482,6 +482,8 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
 // TEMPORARY: dumps installed SDK declarations to Telegram. Remove after pump.ts is written.
 bot.command("sdk", async (ctx) => {
   if (!(await owner(ctx))) return;
+  await ctx.reply("Reading SDK declarations...");
+  try {
   const dir = "node_modules/@pump-fun/pump-sdk";
   const pkg = JSON.parse(fs.readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
   const lines = fs.readFileSync(`${dir}/dist/index.d.ts`, "utf8").split("\n");
@@ -504,6 +506,9 @@ bot.command("sdk", async (ctx) => {
     if (/^declare function getBuyTokenAmountFromSolAmount/.test(l)) out += `--- getBuyTokenAmountFromSolAmount\n${lines.slice(i, i + 12).join("\n")}\n`;
   });
   for (let i = 0; i < out.length; i += 3800) await ctx.reply(out.slice(i, i + 3800));
+  } catch (e) {
+    await ctx.reply(`SDK read failed: ${e instanceof Error ? e.message : "unknown"}`);
+  }
 });
 
 bot.catch((err) => console.error("Bot error:", err instanceof Error ? err.message : "unknown"));
