@@ -1,8 +1,10 @@
+import { randomInt } from "node:crypto";
 import {
   ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
+  SendTransactionError,
   SystemProgram,
   Transaction,
   TransactionInstruction,
@@ -118,7 +120,18 @@ export async function sendTx(ixs: TransactionInstruction[], signers: Keypair[]):
   const tx = new Transaction({ feePayer: signers[0].publicKey, blockhash, lastValidBlockHeight });
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }), ...ixs);
   tx.sign(...signers);
-  const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 0 });
+  let sig: string;
+  try {
+    sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 0 });
+  } catch (e) {
+    let detail = e instanceof Error ? e.message : String(e);
+    let logs: string[] | undefined = (e as { logs?: string[] }).logs;
+    if (!logs && e instanceof SendTransactionError) {
+      logs = await e.getLogs(connection).catch(() => undefined);
+    }
+    if (logs && logs.length) detail += " | " + logs.slice(-5).join(" | ");
+    throw new Error(detail);
+  }
   console.log("Transaction submitted", sig);
   try {
     const res = await connection.confirmTransaction(
@@ -164,11 +177,24 @@ export function friendlyError(e: unknown): string {
   if (l.includes("insufficient funds") || l.includes("insufficient lamports") || l.includes("\"custom\":1"))
     return "Insufficient SOL balance.";
   if (l.includes("blockhash")) return "Blockhash expired. Try again.";
-  if (l.includes("simulation failed")) return "Transaction simulation failed.";
+  if (l.includes("simulation failed")) return m.length > 700 ? m.slice(0, 700) + "…" : m;
   if (l.includes("account not found") || l.includes("could not find")) return "Account not found.";
   if (l.includes("slippage")) return "Slippage exceeded.";
   if (l.includes("invalid amount") || l.includes("invalid sol")) return "Invalid amount.";
   if (l.includes("fetch failed") || l.includes("429") || l.includes("econn")) return "RPC unavailable.";
   if (l.includes("pump module")) return m;
   return m.length > 300 ? m.slice(0, 300) + "…" : m;
+}
+
+/** Random split of `total` lamports over n wallets, each at least minEach. Sums exactly to total. */
+export function randomSplit(total: bigint, n: number, minEach: bigint): bigint[] {
+  if (total < minEach * BigInt(n)) {
+    throw new Error(`Total too small: each wallet needs at least ${formatSol(minEach)} SOL`);
+  }
+  const spare = total - minEach * BigInt(n);
+  const w = Array.from({ length: n }, () => randomInt(1, 101));
+  const sum = BigInt(w.reduce((a, b) => a + b, 0));
+  const out = w.map((x) => minEach + (spare * BigInt(x)) / sum);
+  out[n - 1] += total - out.reduce((a, b) => a + b, 0n);
+  return out;
 }
