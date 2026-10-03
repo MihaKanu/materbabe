@@ -17,6 +17,7 @@ const authorized = new Set<number>();
 const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
 const TOP_HOLDER_WALLETS = 10;
 const ALLOC_ATA_RENT = 2_500_000n; // per-wallet token account rent estimate
+const CHUSI_RESERVE = 5_000_000n; // extra SOL per launch-buy wallet for account rent/fees
 const CREATE_COST_BUFFER = 30_000_000n; // account rent + fees for a new coin
 const GRAD_MSG =
   "⚠️ This token has graduated from the bonding curve.\nBonding-curve trading is unavailable.\nUse the appropriate PumpSwap/AMM implementation if enabled.";
@@ -29,7 +30,7 @@ interface Confirm {
   run: () => Promise<RunResult>;
   expires: number;
 }
-type CreateStep = "name" | "symbol" | "uri" | "desc" | "image" | "twitter" | "website" | "alloc" | "buy";
+type CreateStep = "name" | "symbol" | "uri" | "desc" | "image" | "twitter" | "website" | "alloc" | "buy" | "chusi" | "chusiSol" | "disclink";
 interface CreateFlow {
   kind: "create";
   step: CreateStep;
@@ -42,6 +43,10 @@ interface CreateFlow {
   imageFileId?: string;
   twitter?: string;
   website?: string;
+  buyLamports?: bigint;
+  pct10?: number;
+  chusiCount?: number;
+  disclosureLink?: string;
 }
 type Flow =
   | { kind: "fund"; step: "wallet" | "amount"; walletId?: string }
@@ -561,40 +566,121 @@ async function allocateTop10(mint: PublicKey): Promise<string> {
   }
 }
 
-async function confirmCreate(ctx: Context, uid: number, f: CreateFlow, buyLamports: bigint, pct10: number): Promise<void> {
+async function confirmCreate(
+  ctx: Context,
+  uid: number,
+  f: CreateFlow,
+  buyLamports: bigint,
+  pct10: number,
+  chusiCount: number,
+  chusiTotal: bigint,
+): Promise<void> {
   const name = f.name!;
   const symbol = f.symbol!;
-  const extra = pct10 > 0 ? ALLOC_ATA_RENT * BigInt(TOP_HOLDER_WALLETS) : 0n;
-  const need = buyLamports + extra + CREATE_COST_BUFFER;
+  const allocExtra = pct10 > 0 ? ALLOC_ATA_RENT * BigInt(TOP_HOLDER_WALLETS) : 0n;
+  const shares = chusiCount > 0 ? sol.randomSplit(chusiTotal, chusiCount, MIN_PER_WALLET) : [];
+  const chusiExtra = BigInt(chusiCount) * (CHUSI_RESERVE + 100_000n);
+  const need = buyLamports + allocExtra + chusiTotal + chusiExtra + CREATE_COST_BUFFER;
   const mbal = await sol.getSolBalance(config.master.publicKey);
   if (mbal < need) throw new Error(`Insufficient master-wallet balance. Need about ${sol.formatSol(need)} SOL.`);
+
+  let shareLine = "";
+  if (buyLamports + chusiTotal > 0n) {
+    const cq = await pump.creationQuote(buyLamports + chusiTotal);
+    const pctControlled = Number((cq.tokensRaw * 1000n) / cq.supplyRaw) / 10;
+    if (pctControlled > 30) {
+      throw new Error(`Operator-controlled wallets would hold about ${pctControlled.toFixed(1)}% at launch. The limit is 30%. Lower the SOL amounts.`);
+    }
+    shareLine = `\nEstimated operator-controlled share at launch: ~${pctControlled.toFixed(1)}% (limit 30%)`;
+  }
+
   const price = await sol.getSolPriceUsd();
-  const usd = price ? ` (~$${((Number(buyLamports) / 1e9) * price).toFixed(2)})` : "";
+  const usd = (l: bigint): string => (price ? ` (~$${((Number(l) / 1e9) * price).toFixed(2)})` : "");
   flows.delete(uid);
-  const allocLine =
+
+  const buyLine =
     pct10 > 0
-      ? `Top-10 allocation: ${(pct10 / 10).toFixed(1)}% of supply\nBuy amount: ${sol.formatSol(buyLamports)} SOL${usd}\nSplit across ${TOP_HOLDER_WALLETS} new Chusi wallets (operator-controlled, listed in the public disclosure)\nExtra account rent: ~${sol.formatSol(extra)} SOL`
-      : `Initial buy: ${sol.formatSol(buyLamports)} SOL${usd}`;
+      ? `Top-10 allocation: ${(pct10 / 10).toFixed(1)}% of supply\nBuy amount: ${sol.formatSol(buyLamports)} SOL${usd(buyLamports)}\nSplit across ${TOP_HOLDER_WALLETS} new Chusi wallets\nExtra account rent: ~${sol.formatSol(allocExtra)} SOL`
+      : `Initial buy: ${sol.formatSol(buyLamports)} SOL${usd(buyLamports)}`;
+  const preview = shares.map((s, i) => `#${i + 1}: ${(Number((s * 10000n) / chusiTotal) / 100).toFixed(2)}% (${sol.formatSol(s)} SOL)`);
+  const chusiLine =
+    chusiCount > 0
+      ? `\nLaunch buys: ${chusiCount} Chusi wallets, ${sol.formatSol(chusiTotal)} SOL${usd(chusiTotal)} (random split)\n${clip(preview, 12)}\nEach wallet also gets ${sol.formatSol(CHUSI_RESERVE)} SOL for account rent and fees.\nThey buy right after the coin is created.`
+      : "";
+  const disclosed = pct10 > 0 || chusiCount > 0;
   const uriLine = f.self
-    ? `Metadata: hosted by this bot${f.desc ? "\nDescription: " + f.desc.slice(0, 100) : ""}${f.twitter ? "\nX: " + f.twitter : ""}${f.website ? "\nWebsite: " + f.website : ""}`
-    : `URI: ${f.uri}${pct10 > 0 ? `\nAdd this disclosure link to your own metadata: ${config.publicUrl}/disclosure` : ""}`;
+    ? `Metadata: hosted by this bot${f.desc ? "\nDescription: " + f.desc.slice(0, 100) : ""}${f.twitter ? "\nX: " + f.twitter : ""}${f.website ? "\nWebsite: " + f.website : ""}${disclosed ? "\nDisclosure link: " + (f.disclosureLink ?? `${config.publicUrl}/disclosure`) : ""}`
+    : `URI: ${f.uri}${disclosed ? `\nAdd this disclosure link to your own metadata: ${config.publicUrl}/disclosure` : ""}`;
+
   await askConfirm(
     ctx,
-    `Action: CREATE COIN\nName: ${name}\nSymbol: ${symbol}\n${uriLine}\n${allocLine}\nMayhem Mode: OFF\nSlippage: ${config.slippagePercent}%`,
+    `Action: CREATE COIN\nName: ${name}\nSymbol: ${symbol}\n${uriLine}\n${buyLine}${chusiLine}${shareLine}\nOperator wallets are listed in the public disclosure.\nTotal from master: ~${sol.formatSol(need)} SOL${usd(need)}\nMayhem Mode: OFF\nSlippage: ${config.slippagePercent}%`,
     "master",
     async () => {
       let uri = f.uri ?? "";
       if (f.self) {
         let d = f.desc ?? "";
-        if (pct10 > 0) d += `${d ? "\n\n" : ""}Dev-controlled wallets are disclosed: ${meta.baseUrl()}/disclosure`;
+        if (disclosed) d += `${d ? "\n\n" : ""}Dev-controlled wallets are disclosed: ${f.disclosureLink ?? `${meta.baseUrl()}/disclosure`}`;
         uri = await meta.save({ name, symbol, description: d, imageUrl: f.imageUrl, imageFileId: f.imageFileId, twitter: f.twitter, website: f.website }, bot.telegram);
       }
-      const r = await pump.createCoin({ name, symbol, uri, creator: config.master, initialBuyLamports: buyLamports, slippageBps: config.slippageBps, mayhemMode: false });
+
+      // 1. create and fund the launch-buy wallets from master
+      const funded: { w: store.WalletPublic; share: bigint }[] = [];
+      const notes: string[] = [];
+      if (chusiCount > 0) {
+        const wallets = store.createWallets("chusi", chusiCount);
+        for (const w of wallets) disclosure.record({ type: "wallet_created", walletId: w.id, publicKey: w.publicKey });
+        for (let i = 0; i < wallets.length; i += 10) {
+          const slice = wallets.slice(i, i + 10);
+          try {
+            const ixs = slice.map((w, j) =>
+              SystemProgram.transfer({ fromPubkey: config.master.publicKey, toPubkey: new PublicKey(w.publicKey), lamports: shares[i + j] + CHUSI_RESERVE }),
+            );
+            const sig = await sol.sendTx(ixs, [config.master]);
+            slice.forEach((w, j) => {
+              disclosure.record({ type: "funded", walletId: w.id, publicKey: w.publicKey, lamports: (shares[i + j] + CHUSI_RESERVE).toString(), signature: sig });
+              funded.push({ w, share: shares[i + j] });
+            });
+          } catch (e) {
+            notes.push(`Funding stopped: ${sol.friendlyError(e)}`);
+            break;
+          }
+        }
+      }
+
+      // 2. launch
+      let r: { mint: string; signature: string };
+      try {
+        r = await pump.createCoin({ name, symbol, uri, creator: config.master, initialBuyLamports: buyLamports, slippageBps: config.slippageBps, mayhemMode: false });
+      } catch (e) {
+        const fundedNote = funded.length ? ` Chusi wallets ${funded[0].w.id}-${funded[funded.length - 1].w.id} were already funded; use Send SOL Out to return that SOL.` : "";
+        throw new Error(`${sol.friendlyError(e)}${fundedNote}`);
+      }
       store.addCoin({ mint: r.mint, name, symbol });
       disclosure.record({ type: "coin_created", signature: r.signature, note: `${symbol} ${r.mint}` });
-      const alloc = pct10 > 0 ? await allocateTop10(new PublicKey(r.mint)) : "";
+      const mintPk = new PublicKey(r.mint);
+
+      // 3. launch buys, one after another so each one prices off fresh state
+      const buyLines: string[] = [];
+      let okBuys = 0;
+      for (const { w, share } of funded) {
+        try {
+          const kp = store.signerFor(w.id);
+          if (!kp) throw new Error("Wallet not found");
+          const sig = await pump.buy(mintPk, kp, share, config.slippageBps, config.master);
+          okBuys++;
+          disclosure.record({ type: "bought", walletId: w.id, publicKey: w.publicKey, lamports: share.toString(), signature: sig, note: `bought ${r.mint}` });
+          buyLines.push(`${w.id} ✅ ${sol.formatSol(share)} SOL`);
+        } catch (e) {
+          buyLines.push(`${w.id} ❌ ${sol.friendlyError(e)}`);
+        }
+      }
+
+      // 4. optional top-10 allocation
+      const alloc = pct10 > 0 ? await allocateTop10(mintPk) : "";
+      const buysText = chusiCount > 0 ? `\n\nLaunch buys: ${okBuys}/${chusiCount} succeeded\n${buyLines.join("\n")}${notes.length ? "\n" + notes.join("\n") : ""}` : "";
       return {
-        text: `🚀 COIN CREATED\nName: ${name}\nSymbol: ${symbol}\nMint: ${r.mint}\nBuy: ${sol.formatSol(buyLamports)} SOL\nTransaction: ${r.signature}\nSolscan: ${sol.txLink(r.signature)}${alloc}`,
+        text: `🚀 COIN CREATED\nName: ${name}\nSymbol: ${symbol}\nMint: ${r.mint}\nTransaction: ${r.signature}\nSolscan: ${sol.txLink(r.signature)}${alloc}${buysText}`,
         mint: r.mint,
       };
     },
@@ -646,7 +732,14 @@ async function handleCreate(ctx: Context, uid: number, f: CreateFlow, text: stri
       return void (await ctx.reply("Website link (https://…), or SKIP:"));
     }
     case "website": {
-      flows.set(uid, { ...f, step: "alloc", website: skip ? undefined : cleanUrl(text) });
+      flows.set(uid, { ...f, step: "disclink", website: skip ? undefined : cleanUrl(text) });
+      return void (await ctx.reply(
+        `Disclosure link for the description (used only if operator wallets are involved).\nSend DEFAULT for ${config.publicUrl}/disclosure, or paste your own https link:`,
+      ));
+    }
+    case "disclink": {
+      const link = text.toUpperCase() === "DEFAULT" ? undefined : cleanUrl(text);
+      flows.set(uid, { ...f, step: "alloc", disclosureLink: link });
       return void (await askAlloc(ctx));
     }
     case "alloc": {
@@ -661,13 +754,33 @@ async function handleCreate(ctx: Context, uid: number, f: CreateFlow, text: stri
       if (q.lamports > BigInt(Math.round(config.maxAllocationSol * 1e9))) {
         throw new Error(`Cost exceeds MAX_ALLOCATION_SOL (${config.maxAllocationSol}).`);
       }
-      return confirmCreate(ctx, uid, f, q.lamports, pct10);
+      flows.set(uid, { ...f, step: "chusi", buyLamports: q.lamports, pct10 });
+      return void (await askChusi(ctx));
     }
     case "buy": {
       const lamports = text === "0" ? 0n : sol.parseSol(text, config.maxSingleBuySol);
-      return confirmCreate(ctx, uid, f, lamports, 0);
+      flows.set(uid, { ...f, step: "chusi", buyLamports: lamports, pct10: 0 });
+      return void (await askChusi(ctx));
+    }
+    case "chusi": {
+      const n = Number(text);
+      if (!Number.isInteger(n) || n < 0 || n > 50) throw new Error("Enter a whole number from 0 to 50");
+      if (n === 0) return confirmCreate(ctx, uid, f, f.buyLamports ?? 0n, f.pct10 ?? 0, 0, 0n);
+      flows.set(uid, { ...f, step: "chusiSol", chusiCount: n });
+      return void (await ctx.reply(`Total SOL for the ${n} launch-buy wallets (min ${sol.formatSol(MIN_PER_WALLET * BigInt(n))}, max ${config.maxMultiTotalSol}):`));
+    }
+    case "chusiSol": {
+      const n = f.chusiCount ?? 0;
+      const total = sol.parseSol(text, config.maxMultiTotalSol);
+      if (total < MIN_PER_WALLET * BigInt(n)) throw new Error(`Each wallet needs at least ${sol.formatSol(MIN_PER_WALLET)} SOL`);
+      return confirmCreate(ctx, uid, f, f.buyLamports ?? 0n, f.pct10 ?? 0, n, total);
     }
   }
+}
+async function askChusi(ctx: Context): Promise<void> {
+  await ctx.reply(
+    "Launch-buy wallets: how many Chusi wallets should buy right after the coin is created? (0-50, 0 for none).\nThey are operator-controlled and listed in the public disclosure.",
+  );
 }
 async function askAlloc(ctx: Context): Promise<void> {
   await ctx.reply(
