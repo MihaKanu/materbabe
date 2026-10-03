@@ -13,6 +13,12 @@ export interface WalletPublic {
   id: string;
   group: Group;
   publicKey: string;
+  index: number;
+}
+export interface Position {
+  spent: string; // lamports invested
+  realized: string; // estimated lamports returned from sells
+  entryMcap?: string; // market cap (lamports) at first recorded buy
 }
 export interface SourceInfo {
   id: string;
@@ -35,11 +41,12 @@ interface Data {
   nextC: number;
   wallets: WalletRec[];
   coins: CoinRec[];
+  positions: Record<string, Position>;
 }
 
 const root = scryptSync(config.storeKey, "materbabe-wallet-derivation-v1", 32);
 const file = path.join(config.dataDir, "registry.json");
-let data: Data = { nextIndex: 0, nextW: 1, nextC: 1, wallets: [], coins: [] };
+let data: Data = { nextIndex: 0, nextW: 1, nextC: 1, wallets: [], coins: [], positions: {} };
 
 function derive(index: number): Keypair {
   return Keypair.fromSeed(createHmac("sha256", root).update(`wallet:${index}`).digest());
@@ -54,6 +61,8 @@ export function loadStore(): void {
   if (raw.trim() === "") return;
   try {
     data = JSON.parse(raw) as Data;
+    data.positions ??= {};
+    data.coins ??= [];
   } catch {
     throw new Error("registry.json is corrupt. Not overwriting it; fix or move the file (a .bak copy may exist).");
   }
@@ -84,7 +93,7 @@ export function createWallets(group: Group, count: number): WalletPublic[] {
   const made: WalletPublic[] = [];
   for (let i = 0; i < count; i++) {
     const r = add(group, data.nextIndex++);
-    made.push({ id: r.id, group: r.group, publicKey: r.publicKey });
+    made.push({ id: r.id, group: r.group, publicKey: r.publicKey, index: r.index });
   }
   save();
   return made;
@@ -108,7 +117,7 @@ export function recoverRange(count: number): number {
 export function getWallets(group?: Group): WalletPublic[] {
   return data.wallets
     .filter((w) => !group || w.group === group)
-    .map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey }));
+    .map((w) => ({ id: w.id, group: w.group, publicKey: w.publicKey, index: w.index }));
 }
 
 export function getWallet(id: string): WalletPublic | undefined {
@@ -140,4 +149,21 @@ export function addCoin(c: Omit<CoinRec, "createdAt">): void {
 }
 export function getCoins(): CoinRec[] {
   return data.coins;
+}
+
+export function getPosition(mint: string): Position | undefined {
+  return data.positions[mint];
+}
+export function addSpent(mint: string, lamports: bigint, entryMcap?: bigint): void {
+  const p = data.positions[mint] ?? { spent: "0", realized: "0" };
+  p.spent = (BigInt(p.spent) + lamports).toString();
+  if (!p.entryMcap && entryMcap !== undefined) p.entryMcap = entryMcap.toString();
+  data.positions[mint] = p;
+  save();
+}
+export function addRealized(mint: string, lamports: bigint): void {
+  const p = data.positions[mint] ?? { spent: "0", realized: "0" };
+  p.realized = (BigInt(p.realized) + lamports).toString();
+  data.positions[mint] = p;
+  save();
 }
