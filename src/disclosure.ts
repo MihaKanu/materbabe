@@ -5,7 +5,7 @@ import { formatSol, short, txLink } from "./solana.js";
 
 export interface DisclosureEntry {
   ts: string;
-  type: "wallet_created" | "funded" | "sold" | "sent" | "coin_created" | "allocated" | "burned";
+  type: "wallet_created" | "funded" | "sold" | "sent" | "coin_created" | "allocated" | "burned" | "bought";
   walletId?: string;
   publicKey?: string;
   lamports?: string;
