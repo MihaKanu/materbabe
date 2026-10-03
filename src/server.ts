@@ -11,6 +11,7 @@ const MIME: Record<string, string> = {
   gif: "image/gif",
 };
 
+/** Health check + public files: /disclosure, /meta/<id>.json, /img/<id>.<ext>. No secrets are served. */
 export function startServer(port: number, renderDisclosure: () => string): void {
   http
     .createServer((req, res) => {
