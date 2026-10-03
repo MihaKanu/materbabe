@@ -10,6 +10,7 @@ import * as pump from "./pump.js";
 import * as tokens from "./tokens.js";
 import * as disclosure from "./disclosure.js";
 import * as meta from "./metadata.js";
+import * as card from "./card.js";
 import { startServer } from "./server.js";
 
 const bot = new Telegraf(config.telegramToken, { handlerTimeout: 900_000 });
@@ -24,7 +25,7 @@ const GRAD_MSG =
   "⚠️ This token has graduated from the bonding curve.\nBonding-curve trading is unavailable.\nUse the appropriate PumpSwap/AMM implementation if enabled.";
 
 // ---------- types ----------
-type RunResult = string | { text: string; mint: string };
+type RunResult = string | { text: string; mint?: string; photo?: Buffer };
 interface Confirm {
   userId: number;
   lockKey: string;
@@ -57,6 +58,7 @@ type Flow =
   | { kind: "analytics" }
   | { kind: "panel"; step: "coin" | "mint" }
   | { kind: "export" }
+  | { kind: "cardimg" }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -508,7 +510,39 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
           }
         });
       }
-      return `Sell-all finished: ${ok}/${rows.length} succeeded.\nProceeds stay in each wallet.\n\n${out.join("\n")}${await pnlCard(mint)}`;
+      const text = `Sell-all finished: ${ok}/${rows.length} succeeded.\nProceeds stay in each wallet.\n\n${out.join("\n")}${await pnlCard(mint)}`;
+      let photo: Buffer | undefined;
+      if (pct === 100 && ok > 0) {
+        try {
+          let multiplier = "";
+          let pnl = "";
+          let profit = true;
+          const pos = store.getPosition(mint.toBase58());
+          if (pos && BigInt(pos.spent) > 0n) {
+            const spent = BigInt(pos.spent);
+            const back = BigInt(pos.realized);
+            const price = await solUsd();
+            const m = Number(back) / Number(spent);
+            let mt = m >= 10 ? String(Math.round(m)) : m.toFixed(2);
+            if (mt.includes(".")) mt = mt.replace(/0+$/, "").replace(/\.$/, "");
+            multiplier = `${mt}x`;
+            profit = back >= spent;
+            const diff = profit ? back - spent : spent - back;
+            const sign = profit ? "+" : "-";
+            if (price) {
+              const usd = (Number(diff) / 1e9) * price;
+              pnl = `${sign}$${usd >= 1000 ? Math.round(usd).toLocaleString("en-US") : usd.toFixed(2)}`;
+            } else {
+              pnl = `${sign}${sol.formatSol(diff)} SOL`;
+            }
+          }
+          const coin = store.getCoins().find((c) => c.mint === mint.toBase58());
+          photo = await card.renderCard({ symbol: coin?.symbol ?? "", image: coin?.image, multiplier, pnl, profit });
+        } catch (e) {
+          console.error("Card render failed:", e instanceof Error ? e.message : "unknown");
+        }
+      }
+      return { text, photo };
     },
   );
 }
@@ -628,10 +662,13 @@ async function confirmCreate(
     "master",
     async () => {
       let uri = f.uri ?? "";
+      let coinImage: string | undefined;
       if (f.self) {
         let d = f.desc ?? "";
         if (disclosed) d += `${d ? "\n\n" : ""}${disclosureLine(f)}`;
-        uri = await meta.save({ name, symbol, description: d, imageUrl: f.imageUrl, imageFileId: f.imageFileId, twitter: f.twitter, website: f.website }, bot.telegram);
+        const saved = await meta.save({ name, symbol, description: d, imageUrl: f.imageUrl, imageFileId: f.imageFileId, twitter: f.twitter, website: f.website }, bot.telegram);
+        uri = saved.uri;
+        coinImage = saved.image;
       }
 
       // 1. create and fund the launch-buy wallets from master
@@ -666,7 +703,7 @@ async function confirmCreate(
         const fundedNote = funded.length ? ` Chusi wallets ${funded[0].w.id}-${funded[funded.length - 1].w.id} were already funded; use Send SOL Out to return that SOL.` : "";
         throw new Error(`${sol.friendlyError(e)}${fundedNote}`);
       }
-      store.addCoin({ mint: r.mint, name, symbol });
+      store.addCoin({ mint: r.mint, name, symbol, image: coinImage });
       disclosure.record({ type: "coin_created", signature: r.signature, note: `${symbol} ${r.mint}` });
       const mintPk = new PublicKey(r.mint);
       let entryMcap: bigint | undefined;
@@ -1016,6 +1053,11 @@ bot.command("send", startSend);
 bot.command("disclosure", sendDisclosure);
 bot.command("panel", startPanelCmd);
 bot.command("export", startExport);
+bot.command("cardimage", async (ctx) => {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from.id, { kind: "cardimg" });
+  await ctx.reply("Send the cut-out picture for the sell card. Send it as a FILE (PNG) to keep a transparent background, or as a normal photo.");
+});
 bot.command("clear", (ctx) => clearChat(ctx, ctx.message.message_id));
 bot.command("recover", async (ctx) => {
   if (!(await owner(ctx))) return;
@@ -1147,7 +1189,8 @@ bot.action(/^c:([0-9a-f]+)$/, async (ctx) => {
       await sendLong(ctx, out);
     } else {
       await sendLong(ctx, out.text);
-      await sendCa(ctx, out.mint);
+      if (out.photo) await ctx.replyWithPhoto({ source: out.photo });
+      if (out.mint) await sendCa(ctx, out.mint);
     }
   } catch (e) {
     if (e instanceof sol.LockedError) {
@@ -1160,9 +1203,30 @@ bot.action(/^c:([0-9a-f]+)$/, async (ctx) => {
 });
 
 // ---------- photo + text input ----------
+async function saveCharacter(ctx: Context, fileId: string, ext: "png" | "jpg"): Promise<void> {
+  const link = await ctx.telegram.getFileLink(fileId);
+  const res = await fetch(link.href);
+  if (!res.ok) throw new Error("Could not download the image");
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > 8_000_000) throw new Error("Image is larger than 8 MB");
+  card.setCharacter(buf, ext);
+  await ctx.reply("✅ Sell card picture saved.");
+}
+bot.on("document", async (ctx) => {
+  const uid = ctx.from.id;
+  if (uid !== config.ownerTelegramId || flows.get(uid)?.kind !== "cardimg") return;
+  flows.delete(uid);
+  const d = ctx.message.document;
+  await safe(ctx, () => saveCharacter(ctx, d.file_id, d.mime_type === "image/png" ? "png" : "jpg"));
+});
 bot.on("photo", async (ctx) => {
   const uid = ctx.from.id;
   const f = flows.get(uid);
+  if (uid === config.ownerTelegramId && f?.kind === "cardimg") {
+    flows.delete(uid);
+    const ph = ctx.message.photo[ctx.message.photo.length - 1];
+    return void (await safe(ctx, () => saveCharacter(ctx, ph.file_id, "jpg")));
+  }
   if (uid !== config.ownerTelegramId || f?.kind !== "create" || f.step !== "image") return;
   const photo = ctx.message.photo[ctx.message.photo.length - 1];
   flows.set(uid, { ...f, step: "twitter", imageFileId: photo.file_id });
