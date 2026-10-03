@@ -61,6 +61,8 @@ export const config = {
   maxSingleBuySol: positive("MAX_SINGLE_BUY_SOL"),
   maxPayoutSol: positive("MAX_PAYOUT_SOL"),
   maxSingleFundSol: positive("MAX_SINGLE_FUND_SOL", "1"),
+  maxWalletSendSol: positive("MAX_WALLET_SEND_SOL", "50"),
+  maxMultiTotalSol: positive("MAX_MULTI_TOTAL_SOL", "5"),
   slippagePercent,
   slippageBps: Math.round(slippagePercent * 100),
   storePath: process.env.WALLET_STORE_PATH?.trim() || "./data/wallets.json",
