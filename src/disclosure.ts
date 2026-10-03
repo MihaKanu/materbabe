@@ -5,7 +5,7 @@ import { formatSol, short, txLink } from "./solana.js";
 
 export interface DisclosureEntry {
   ts: string;
-  type: "wallet_created" | "funded" | "sold" | "sent";
+  type: "wallet_created" | "funded" | "sold" | "sent" | "coin_created" | "allocated" | "burned";
   walletId?: string;
   publicKey?: string;
   lamports?: string;
@@ -13,7 +13,7 @@ export interface DisclosureEntry {
   note?: string;
 }
 
-const file = path.join(path.dirname(config.storePath), "disclosure.jsonl");
+const file = path.join(config.dataDir, "disclosure.jsonl");
 
 /** Append-only public record. Contains addresses and signatures only, never keys. */
 export function record(e: Omit<DisclosureEntry, "ts">): void {
@@ -24,7 +24,7 @@ export function record(e: Omit<DisclosureEntry, "ts">): void {
 export function render(): string {
   let out =
     "MATERBABE COIN KIRKINATOR — WALLET DISCLOSURE\n" +
-    "The wallets below are CONTROLLED BY THE OPERATOR of this bot.\n" +
+    "The wallets below (treasury and Chusi wallets) are CONTROLLED BY THE OPERATOR of this bot.\n" +
     "They are not independent holders.\n" +
     `Master wallet: ${config.master.publicKey.toBase58()}\n\n`;
   if (!fs.existsSync(file)) return out + "(no entries yet)\n";
