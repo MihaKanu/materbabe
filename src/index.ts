@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import bs58 from "bs58";
 import { Context, Markup, Telegraf } from "telegraf";
 import type { InlineKeyboardButton } from "telegraf/types";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
@@ -54,6 +55,8 @@ type Flow =
   | CreateFlow
   | { kind: "trade"; side: "buy" | "sell"; step: "mint" | "wallet" | "amount"; mint?: PublicKey; walletId?: string }
   | { kind: "analytics" }
+  | { kind: "panel"; step: "coin" | "mint" }
+  | { kind: "export" }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -126,6 +129,7 @@ const menuKb = () =>
     [Markup.button.callback("💥 Sell All Wallets", "m:sellall"), Markup.button.callback("🔥 Burn", "m:burn")],
     [Markup.button.callback("📊 Token Analytics", "m:analytics"), Markup.button.callback("📤 Payout", "m:payout")],
     [Markup.button.callback("📤 Send SOL Out", "m:send"), Markup.button.callback("⚙️ Admin", "m:admin")],
+    [Markup.button.callback("📈 Live Panel", "m:panel"), Markup.button.callback("🔐 Export Wallets", "m:export")],
     [Markup.button.callback("🧹 Clear Chat", "m:clear"), Markup.button.callback("📄 Disclosure", "m:disclosure")],
   ]);
 
@@ -343,6 +347,10 @@ async function onMint(ctx: Context, uid: number, f: Flow, mint: PublicKey): Prom
     flows.delete(uid);
     return runAnalytics(ctx, mint.toBase58());
   }
+  if (f.kind === "panel") {
+    flows.delete(uid);
+    return startPanel(ctx, uid, mint);
+  }
   if (f.kind === "trade") {
     const c = await pump.getCurveState(mint);
     if (c.graduated) {
@@ -450,6 +458,7 @@ async function planSellOne(
     `wallet:${walletId}`,
     async () => {
       const sig = await pump.sell(mint, kp, raw, config.slippageBps, payer);
+      store.addRealized(mint.toBase58(), q.estLamports);
       disclosure.record({ type: "sold", walletId, publicKey: kp.publicKey.toBase58(), signature: sig, note: `sold ${sol.formatUnits(raw, tb.decimals)} of ${mint.toBase58()}` });
       return `✅ Sell submitted\n${sol.txLink(sig)}`;
     },
@@ -491,6 +500,7 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
           const r = chunk[j];
           if (x.status === "fulfilled") {
             ok++;
+            store.addRealized(mint.toBase58(), (q.estLamports * r.raw) / total);
             disclosure.record({ type: "sold", walletId: r.id, signature: x.value, note: `sold ${sol.formatUnits(r.raw, decimals)} of ${mint.toBase58()}` });
             out.push(`${r.id} ✅ ${sol.txLink(x.value)}`);
           } else {
@@ -498,7 +508,7 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
           }
         });
       }
-      return `Sell-all finished: ${ok}/${rows.length} succeeded.\nProceeds stay in each wallet.\n\n${out.join("\n")}`;
+      return `Sell-all finished: ${ok}/${rows.length} succeeded.\nProceeds stay in each wallet.\n\n${out.join("\n")}${await pnlCard(mint)}`;
     },
   );
 }
@@ -620,7 +630,7 @@ async function confirmCreate(
       let uri = f.uri ?? "";
       if (f.self) {
         let d = f.desc ?? "";
-        if (disclosed) d += `${d ? "\n\n" : ""}Dev-controlled wallets are disclosed: ${f.disclosureLink ?? `${meta.baseUrl()}/disclosure`}`;
+        if (disclosed) d += `${d ? "\n\n" : ""}${disclosureLine(f)}`;
         uri = await meta.save({ name, symbol, description: d, imageUrl: f.imageUrl, imageFileId: f.imageFileId, twitter: f.twitter, website: f.website }, bot.telegram);
       }
 
@@ -659,6 +669,13 @@ async function confirmCreate(
       store.addCoin({ mint: r.mint, name, symbol });
       disclosure.record({ type: "coin_created", signature: r.signature, note: `${symbol} ${r.mint}` });
       const mintPk = new PublicKey(r.mint);
+      let entryMcap: bigint | undefined;
+      try {
+        entryMcap = (await pump.getCurveNumbers(mintPk)).mcapLamports;
+      } catch {
+        /* optional */
+      }
+      if (buyLamports > 0n) store.addSpent(r.mint, buyLamports, entryMcap);
 
       // 3. launch buys, one after another so each one prices off fresh state
       const buyLines: string[] = [];
@@ -669,6 +686,7 @@ async function confirmCreate(
           if (!kp) throw new Error("Wallet not found");
           const sig = await pump.buy(mintPk, kp, share, config.slippageBps, config.master);
           okBuys++;
+          store.addSpent(r.mint, share, entryMcap);
           disclosure.record({ type: "bought", walletId: w.id, publicKey: w.publicKey, lamports: share.toString(), signature: sig, note: `bought ${r.mint}` });
           buyLines.push(`${w.id} ✅ ${sol.formatSol(share)} SOL`);
         } catch (e) {
@@ -687,6 +705,18 @@ async function confirmCreate(
   );
 }
 
+function readableDisclosure(text: string): string {
+  const visible = text.replace(/[\s\u2800\u200B-\u200F\u2060\uFEFF\u3164\u115F\u1160]/g, "");
+  if (visible.length < 12) {
+    throw new Error("The disclosure must be readable text (at least 12 visible characters). Blank or invisible text is refused because it hides the disclosure.");
+  }
+  return text.trim().slice(0, 200);
+}
+function disclosureLine(f: CreateFlow): string {
+  const t = f.disclosureLink;
+  if (!t) return `Dev-controlled wallets are disclosed: ${meta.baseUrl()}/disclosure`;
+  return /^https:\/\//i.test(t) ? `Dev-controlled wallets are disclosed: ${t}` : t;
+}
 function cleanUrl(text: string): string {
   const u = new URL(text);
   if (u.protocol !== "https:") throw new Error("Link must start with https://");
@@ -734,11 +764,11 @@ async function handleCreate(ctx: Context, uid: number, f: CreateFlow, text: stri
     case "website": {
       flows.set(uid, { ...f, step: "disclink", website: skip ? undefined : cleanUrl(text) });
       return void (await ctx.reply(
-        `Disclosure link for the description (used only if operator wallets are involved).\nSend DEFAULT for ${config.publicUrl}/disclosure, or paste your own https link:`,
+        `Disclosure line for the description (used only if operator wallets are involved).\nSend DEFAULT for ${config.publicUrl}/disclosure, or type your own readable sentence (e.g. Dev wallets C1-C10 hold 12%), or paste an https link. Blank or invisible text is refused because it hides the disclosure:`,
       ));
     }
     case "disclink": {
-      const link = text.toUpperCase() === "DEFAULT" ? undefined : cleanUrl(text);
+      const link = text.toUpperCase() === "DEFAULT" ? undefined : readableDisclosure(text);
       flows.set(uid, { ...f, step: "alloc", disclosureLink: link });
       return void (await askAlloc(ctx));
     }
@@ -788,6 +818,155 @@ async function askAlloc(ctx: Context): Promise<void> {
   );
 }
 
+
+// ---------- price cache, P&L helpers ----------
+let priceCache: { v: number | null; t: number } = { v: null, t: 0 };
+async function solUsd(): Promise<number | null> {
+  if (Date.now() - priceCache.t > 60_000) priceCache = { v: await sol.getSolPriceUsd(), t: Date.now() };
+  return priceCache.v;
+}
+const usdFmt = (l: bigint, price: number | null): string => (price ? `$${((Number(l) / 1e9) * price).toFixed(2)}` : "n/a");
+function signedUsd(l: bigint, price: number | null): string {
+  if (!price) return `${l < 0n ? "-" : "+"}${sol.formatSol(l < 0n ? -l : l)} SOL`;
+  const v = (Number(l) / 1e9) * price;
+  return `${v < 0 ? "-" : "+"}$${Math.abs(v).toFixed(2)}`;
+}
+const symbolOf = (mint: PublicKey): string => store.getCoins().find((c) => c.mint === mint.toBase58())?.symbol ?? sol.short(mint);
+
+async function pnlCard(mint: PublicKey): Promise<string> {
+  const pos = store.getPosition(mint.toBase58());
+  if (!pos) return "";
+  const spent = BigInt(pos.spent);
+  const back = BigInt(pos.realized);
+  const price = await solUsd();
+  const mult = spent > 0n ? `${(Number(back) / Number(spent)).toFixed(2)}x` : "n/a";
+  return `\n\n━━━━━━━━━━━━\n💥 SELL CARD — ${symbolOf(mint)}\nCoin: ${symbolOf(mint)} (${sol.short(mint)})\nEntry mkt cap: ${pos.entryMcap ? sol.formatSol(BigInt(pos.entryMcap), 2) + " SOL" : "n/a"}\nInvested: ${sol.formatSol(spent)} SOL (${usdFmt(spent, price)})\nReturned (est.): ${sol.formatSol(back)} SOL (${usdFmt(back, price)})\nP&L: ${signedUsd(back - spent, price)}\nMultiplier: ${mult}\n(Estimates from quotes; excludes fees.)`;
+}
+
+// ---------- live panel ----------
+interface Panel {
+  chatId: number;
+  messageId: number;
+  mint: PublicKey;
+  samples: number[];
+  total: bigint;
+  decimals: number;
+  wallets: number;
+  lastHold: number;
+  ticks: number;
+  busy: boolean;
+  timer: ReturnType<typeof setInterval>;
+}
+const panels = new Map<number, Panel>();
+const SPARK = "▁▂▃▄▅▆▇█";
+const spark = (a: number[]): string => {
+  if (a.length < 2) return "▁";
+  const lo = Math.min(...a);
+  const hi = Math.max(...a);
+  return a.map((v) => SPARK[hi === lo ? 0 : Math.min(7, Math.floor(((v - lo) / (hi - lo)) * 7.999))]).join("");
+};
+const panelKb = () =>
+  Markup.inlineKeyboard([
+    [1, 5, 10, 15].map((n) => Markup.button.callback(`${n}%`, `v:${n}`)),
+    [25, 50, 75, 100].map((n) => Markup.button.callback(`${n}%`, `v:${n}`)),
+    [Markup.button.callback("⏹ Stop", "v:stop")],
+  ]);
+function stopPanel(uid: number): void {
+  const p = panels.get(uid);
+  if (p) clearInterval(p.timer);
+  panels.delete(uid);
+}
+async function tick(uid: number): Promise<void> {
+  const p = panels.get(uid);
+  if (!p || p.busy) return;
+  p.busy = true;
+  try {
+    p.ticks++;
+    if (p.ticks > 150) {
+      stopPanel(uid);
+      await bot.telegram.editMessageText(p.chatId, p.messageId, undefined, "📈 Panel closed after 10 minutes. Open it again from the menu.");
+      return;
+    }
+    const c = await pump.getCurveNumbers(p.mint);
+    p.samples.push(c.priceSol);
+    if (p.samples.length > 30) p.samples.shift();
+    if (Date.now() - p.lastHold > 15_000) {
+      const rows = await holdings(p.mint, 100, false);
+      p.total = rows.reduce((a, r) => a + r.raw, 0n);
+      p.decimals = rows[0]?.decimals ?? p.decimals;
+      p.wallets = rows.length;
+      p.lastHold = Date.now();
+    }
+    let est = 0n;
+    if (!c.graduated && p.total > 0n) est = (await pump.quoteSell(p.mint, p.total, config.slippageBps)).estLamports;
+    const pos = store.getPosition(p.mint.toBase58());
+    const spent = BigInt(pos?.spent ?? "0");
+    const realized = BigInt(pos?.realized ?? "0");
+    const pnl = est + realized - spent;
+    const price = await solUsd();
+    const pct = spent > 0n ? `${((Number(pnl) / Number(spent)) * 100).toFixed(1)}%` : "n/a";
+    const mult = spent > 0n ? `${(Number(est + realized) / Number(spent)).toFixed(2)}x` : "n/a";
+    const text = `📈 ${symbolOf(p.mint)} LIVE\n${spark(p.samples)}\nPrice: ${c.priceSol.toPrecision(5)} SOL\nMkt cap: ${sol.formatSol(c.mcapLamports, 2)} SOL (${usdFmt(c.mcapLamports, price)})\nHeld: ${sol.formatUnits(p.total, p.decimals, 2)} in ${p.wallets} wallets\nCost basis: ${sol.formatSol(spent)} SOL (${usdFmt(spent, price)})\nEst. value: ${sol.formatSol(est)} SOL (${usdFmt(est, price)})\nP&L: ${signedUsd(pnl, price)} (${pct}) · ${mult}${c.graduated ? "\n⚠️ Graduated: bonding-curve selling unavailable." : ""}\n\nRefreshes about every 4s. Sell buttons ask you to confirm first.`;
+    await bot.telegram.editMessageText(p.chatId, p.messageId, undefined, text, { reply_markup: panelKb().reply_markup });
+  } catch {
+    /* unchanged text or transient RPC error: skip this tick */
+  } finally {
+    p.busy = false;
+  }
+}
+async function startPanel(ctx: Context, uid: number, mint: PublicKey): Promise<void> {
+  stopPanel(uid);
+  const m = await ctx.reply("📈 Loading live panel…", panelKb());
+  panels.set(uid, {
+    chatId: m.chat.id,
+    messageId: m.message_id,
+    mint,
+    samples: [],
+    total: 0n,
+    decimals: 0,
+    wallets: 0,
+    lastHold: 0,
+    ticks: 0,
+    busy: false,
+    timer: setInterval(() => void tick(uid), 4000),
+  });
+  await tick(uid);
+}
+async function startPanelCmd(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "panel", step: "coin" });
+  await askCoin(ctx, "📈 Live panel");
+}
+
+// ---------- export ----------
+async function startExport(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "export" });
+  await ctx.reply(
+    "🔐 EXPORT PRIVATE KEYS\nThis creates a file with every treasury/Chusi wallet's PRIVATE KEY. Telegram is not end-to-end encrypted, so anyone who gets this chat can drain those wallets. The file message auto-deletes after 60 seconds: save it right away, then delete it from your phone.\n\nType EXPORT to continue, or /cancel.",
+  );
+}
+async function doExport(ctx: Context): Promise<void> {
+  const ws = store.getWallets();
+  if (ws.length === 0) return void (await ctx.reply("No wallets to export."));
+  const price = await solUsd();
+  let out = "address | private key (base58, Phantom import) | SOL balance in USD (tokens not valued) | id | number\n";
+  for (let i = 0; i < ws.length; i += 10) {
+    const chunk = ws.slice(i, i + 10);
+    const bals = await Promise.all(chunk.map((w) => sol.getSolBalance(new PublicKey(w.publicKey))));
+    chunk.forEach((w, j) => {
+      const kp = store.signerFor(w.id)!;
+      const usd = price ? `$${((Number(bals[j]) / 1e9) * price).toFixed(2)}` : `${sol.formatSol(bals[j])} SOL`;
+      out += `${w.publicKey} | ${bs58.encode(kp.secretKey)} | ${usd} | ${w.id} | #${w.index}\n`;
+    });
+  }
+  const m = await ctx.replyWithDocument(
+    { source: Buffer.from(out), filename: "wallets-PRIVATE.txt" },
+    { caption: "⚠️ Contains private keys. Auto-deletes from this chat in 60 seconds." },
+  );
+  setTimeout(() => void ctx.telegram.deleteMessage(m.chat.id, m.message_id).catch(() => undefined), 60_000);
+}
+
 // ---------- commands ----------
 bot.start(async (ctx) => {
   if (ctx.from && authorized.has(ctx.from.id)) return showMenu(ctx);
@@ -821,7 +1000,7 @@ bot.command("wallet", async (ctx) => {
   const w = store.getWallet(ctx.message.text.split(/\s+/)[1]?.toUpperCase() ?? "");
   if (!w) return void (await ctx.reply("Wallet not found."));
   const bal = await sol.getSolBalance(new PublicKey(w.publicKey));
-  await ctx.reply(`${w.id} (${w.group})\n${w.publicKey}\n${sol.formatSol(bal)} SOL`);
+  await ctx.reply(`${w.id} (${w.group}) wallet number #${w.index}\n${w.publicKey}\n${sol.formatSol(bal)} SOL`);
 });
 bot.command("create", startCreate);
 bot.command("fund", startFund);
@@ -835,6 +1014,8 @@ bot.command("sellall", startSellAll);
 bot.command("burn", startBurn);
 bot.command("send", startSend);
 bot.command("disclosure", sendDisclosure);
+bot.command("panel", startPanelCmd);
+bot.command("export", startExport);
 bot.command("clear", (ctx) => clearChat(ctx, ctx.message.message_id));
 bot.command("recover", async (ctx) => {
   if (!(await owner(ctx))) return;
@@ -865,6 +1046,8 @@ const routes: Record<string, (ctx: Context) => Promise<void>> = {
   burn: startBurn,
   send: startSend,
   disclosure: sendDisclosure,
+  panel: startPanelCmd,
+  export: startExport,
   clear: (c) =>
     clearChat(c, (c.callbackQuery && "message" in c.callbackQuery ? c.callbackQuery.message?.message_id : undefined) ?? 0),
 };
@@ -925,6 +1108,19 @@ bot.action(/^s:(master|all)$/, async (ctx) => {
     flows.set(uid, { kind: "burn", step: "pct", mint: f.mint, scope: ctx.match[1] as "master" | "all" });
     await ctx.reply("Burn what share?", pctKb());
   }
+});
+
+bot.action(/^v:(\d+|stop)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const uid = ctx.from!.id;
+  const p = panels.get(uid);
+  if (!p) return void (await ctx.reply("Panel closed. Open it again from the menu."));
+  if (ctx.match[1] === "stop") {
+    stopPanel(uid);
+    return void (await ctx.reply("Panel stopped."));
+  }
+  await safe(ctx, () => planSellAll(ctx, uid, p.mint, Number(ctx.match[1])));
 });
 
 bot.action(/^x:([0-9a-f]+)$/, async (ctx) => {
@@ -992,7 +1188,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
 
   const wantsMint =
     (f.kind === "trade" && f.step === "mint") ||
-    ((f.kind === "sellall" || f.kind === "burn") && (f.step === "coin" || f.step === "mint"));
+    ((f.kind === "sellall" || f.kind === "burn" || f.kind === "panel") && (f.step === "coin" || f.step === "mint"));
   if (wantsMint) return onMint(ctx, uid, f, sol.parsePublicKey(text));
 
   if ((f.kind === "fund" || f.kind === "send" || f.kind === "trade") && f.step === "wallet" && /^(M|ALL|[WC]\d+)$/i.test(text)) {
@@ -1003,6 +1199,12 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     const pct = Number(text);
     if (!Number.isInteger(pct) || pct < 1 || pct > 100) throw new Error("Enter a whole number from 1 to 100");
     return onPercent(ctx, uid, f, pct);
+  }
+
+  if (f.kind === "export") {
+    flows.delete(uid);
+    if (text !== "EXPORT") throw new Error("Cancelled: you must type EXPORT exactly.");
+    return doExport(ctx);
   }
 
   if (f.kind === "create") return handleCreate(ctx, uid, f, text);
@@ -1024,7 +1226,14 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
       `Action: BUY\nToken: ${mint.toBase58()}\nWallet: ${wid} ${sol.short(kp.publicKey)}\nSOL input: ${sol.formatSol(lamports)} SOL\nEstimated tokens: ${sol.formatUnits(q.estTokensRaw, tb.decimals)}\nSlippage: ${config.slippagePercent}%\nFees: calculated by SDK`,
       `wallet:${wid}`,
       async () => {
+        let mc: bigint | undefined;
+        try {
+          mc = (await pump.getCurveNumbers(mint)).mcapLamports;
+        } catch {
+          /* optional */
+        }
         const sig = await pump.buy(mint, kp, lamports, config.slippageBps);
+        store.addSpent(mint.toBase58(), lamports, mc);
         return `✅ Buy submitted\n${sol.txLink(sig)}`;
       },
     );
