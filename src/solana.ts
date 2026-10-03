@@ -113,13 +113,22 @@ export async function getTokenBalance(owner: PublicKey, mint: PublicKey): Promis
 }
 
 /** Build, sign, send ONCE, confirm. signers[0] pays fees. */
-export async function sendTx(ixs: TransactionInstruction[], signers: Keypair[]): Promise<string> {
+export const PRIORITY_MICROLAMPORTS = 50_000;
+
+export async function sendTx(
+  ixs: TransactionInstruction[],
+  signers: Keypair[],
+  opts: { computeUnitLimit?: number } = {},
+): Promise<string> {
+  // signers[0] pays the fee. De-duplicate (e.g. master signing as payer and seller).
+  const uniq = [...new Map(signers.map((k) => [k.publicKey.toBase58(), k])).values()];
   const { blockhash, lastValidBlockHeight } = await withRetry(() =>
     connection.getLatestBlockhash("confirmed"),
   );
-  const tx = new Transaction({ feePayer: signers[0].publicKey, blockhash, lastValidBlockHeight });
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }), ...ixs);
-  tx.sign(...signers);
+  const tx = new Transaction({ feePayer: uniq[0].publicKey, blockhash, lastValidBlockHeight });
+  if (opts.computeUnitLimit) tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: opts.computeUnitLimit }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_MICROLAMPORTS }), ...ixs);
+  tx.sign(...uniq);
   let sig: string;
   try {
     sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 0 });
@@ -152,9 +161,11 @@ export async function sendTx(ixs: TransactionInstruction[], signers: Keypair[]):
   return sig;
 }
 
+const TRANSFER_CU = 2_000;
+
 export async function transferSol(from: Keypair, to: PublicKey, lamports: bigint): Promise<string> {
   const ix = SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports });
-  return sendTx([ix], [from]);
+  return sendTx([ix], [from], { computeUnitLimit: TRANSFER_CU });
 }
 
 // ---- per-key transaction locks ----
@@ -174,6 +185,7 @@ export function friendlyError(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e);
   const l = m.toLowerCase();
   if (l.includes("invalid public key")) return "Invalid public key.";
+  if (l.includes("rent")) return "Amount too small: the wallet must stay above the rent minimum or end at exactly 0.";
   if (l.includes("insufficient funds") || l.includes("insufficient lamports") || l.includes("\"custom\":1"))
     return "Insufficient SOL balance.";
   if (l.includes("blockhash")) return "Blockhash expired. Try again.";
@@ -197,4 +209,48 @@ export function randomSplit(total: bigint, n: number, minEach: bigint): bigint[]
   const out = w.map((x) => minEach + (spare * BigInt(x)) / sum);
   out[n - 1] += total - out.reduce((a, b) => a + b, 0n);
   return out;
+}
+
+/** Live fee for a tx: network fee from the RPC for the compiled message plus priority fee. */
+export async function estimateFeeLamports(
+  ixs: TransactionInstruction[],
+  signers: Keypair[],
+  cuLimit: number,
+): Promise<bigint> {
+  const { blockhash } = await withRetry(() => connection.getLatestBlockhash("confirmed"));
+  const tx = new Transaction({ feePayer: signers[0].publicKey, recentBlockhash: blockhash });
+  tx.add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: cuLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_MICROLAMPORTS }),
+    ...ixs,
+  );
+  const fee = await withRetry(() => connection.getFeeForMessage(tx.compileMessage(), "confirmed"));
+  const uniqueSigners = BigInt(new Set(signers.map((k) => k.publicKey.toBase58())).size);
+  const base = BigInt(fee.value ?? Number(5000n * uniqueSigners));
+  const priority = (BigInt(PRIORITY_MICROLAMPORTS) * BigInt(cuLimit)) / 1_000_000n;
+  return base + priority + 1_000n; // small safety margin
+}
+
+/** Exact current cost of a plain SOL transfer signed by `from`. */
+export async function transferFeeLamports(from: Keypair): Promise<bigint> {
+  const ix = SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: from.publicKey, lamports: 1 });
+  return estimateFeeLamports([ix], [from], TRANSFER_CU);
+}
+
+/** Estimated fee for a two-signature (payer + seller) sell/burn tx at the default compute limit. */
+export async function sellFeeEstimate(payer: Keypair): Promise<bigint> {
+  const ix = SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: payer.publicKey, lamports: 1 });
+  return estimateFeeLamports([ix], [payer, Keypair.generate()], 200_000);
+}
+
+export async function getSolPriceUsd(): Promise<number | null> {
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", {
+      signal: AbortSignal.timeout(5000),
+    });
+    const j = (await r.json()) as { solana?: { usd?: number } };
+    return typeof j.solana?.usd === "number" ? j.solana.usd : null;
+  } catch {
+    return null;
+  }
 }
