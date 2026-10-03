@@ -22,11 +22,12 @@ export interface MetaInput {
 }
 
 /** Saves metadata JSON (and an uploaded image) on this server and returns its public URI. */
-export async function save(m: MetaInput, tg: Telegram): Promise<string> {
+export async function save(m: MetaInput, tg: Telegram): Promise<{ uri: string; image?: string }> {
   const base = baseUrl();
   const id = randomBytes(8).toString("hex");
   fs.mkdirSync(metaDir(), { recursive: true });
   let image = m.imageUrl;
+  let localImage: string | undefined;
   if (m.imageFileId) {
     const link = await tg.getFileLink(m.imageFileId);
     const res = await fetch(link.href);
@@ -37,6 +38,7 @@ export async function save(m: MetaInput, tg: Telegram): Promise<string> {
     if (!["png", "jpg", "jpeg", "webp", "gif"].includes(ext)) ext = "jpg";
     fs.writeFileSync(path.join(metaDir(), `${id}.${ext}`), buf);
     image = `${base}/img/${id}.${ext}`;
+    localImage = path.join("meta", `${id}.${ext}`);
   }
   const json: Record<string, unknown> = {
     name: m.name,
@@ -48,5 +50,5 @@ export async function save(m: MetaInput, tg: Telegram): Promise<string> {
   if (m.twitter) json.twitter = m.twitter;
   if (m.website) json.website = m.website;
   fs.writeFileSync(path.join(metaDir(), `${id}.json`), JSON.stringify(json));
-  return `${base}/meta/${id}.json`;
+  return { uri: `${base}/meta/${id}.json`, image: localImage ?? m.imageUrl };
 }
