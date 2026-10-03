@@ -416,7 +416,7 @@ export async function buy(
       solAmount,
       amount,
       slippage: config.slippagePercent,
-      tokenProgram: state.tokenProgram,
+      tokenProgram: await tokenProgramForMint(mint),
     });
   const transaction =
     new Transaction().add(
@@ -504,7 +504,7 @@ export async function sell(
       amount,
       solAmount: expectedSol,
       slippage: config.slippagePercent,
-      tokenProgram: state.tokenProgram,
+      tokenProgram: await tokenProgramForMint(mint),
       mayhemMode: false,
     });
   const transaction =
