@@ -72,6 +72,7 @@ export const config = {
   slippagePercent,
   slippageBps: Math.round(slippagePercent * 100),
   dataDir,
+  cardTitle: process.env.CARD_TITLE?.trim() || "MaterBabe GavinEggz",
   storeKey, // also the seed that derives every wallet key: back it up!
   publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").trim().replace(/\/$/, ""),
   maxAllocationSol: positive("MAX_ALLOCATION_SOL", "40"),
