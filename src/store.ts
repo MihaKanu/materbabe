@@ -96,6 +96,23 @@ export function createWallet(): WalletPublic {
   return { id: rec.id, publicKey: rec.publicKey };
 }
 
+export function createWallets(count: number): WalletPublic[] {
+  const made: WalletPublic[] = [];
+  for (let i = 0; i < count; i++) {
+    const kp = Keypair.generate();
+    const rec: WalletRecord = {
+      id: `W${data.nextId++}`,
+      publicKey: kp.publicKey.toBase58(),
+      secretKey: bs58.encode(kp.secretKey),
+      createdAt: new Date().toISOString(),
+    };
+    data.wallets.push(rec);
+    made.push({ id: rec.id, publicKey: rec.publicKey });
+  }
+  save();
+  return made;
+}
+
 export function getWallets(): WalletPublic[] {
   return data.wallets.map((w) => ({ id: w.id, publicKey: w.publicKey }));
 }
