@@ -296,3 +296,19 @@ export async function creationQuote(lamports: bigint): Promise<{ tokensRaw: bigi
   );
   return { tokensRaw, supplyRaw };
 }
+
+export async function getCurveNumbers(
+  mint: PublicKey,
+): Promise<{ graduated: boolean; mcapLamports: bigint; priceSol: number }> {
+  const { state } = await loadBuy(mint, config.master.publicKey);
+  const bc = state.bondingCurve;
+  const dec = (await sol.withRetry(() => sol.connection.getTokenSupply(mint))).value.decimals;
+  const mc = bondingCurveMarketCap({
+    mintSupply: bc.tokenTotalSupply,
+    virtualQuoteReserves: bc.virtualQuoteReserves,
+    virtualTokenReserves: bc.virtualTokenReserves,
+  });
+  const vq = Number(bc.virtualQuoteReserves.toString()) / 1e9;
+  const vt = Number(bc.virtualTokenReserves.toString()) / 10 ** dec;
+  return { graduated: bc.complete, mcapLamports: toBig(mc), priceSol: vt > 0 ? vq / vt : 0 };
+}
