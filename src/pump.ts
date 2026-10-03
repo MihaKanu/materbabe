@@ -274,3 +274,25 @@ export async function quoteAllocation(
   }
   return { lamports: hi, tokensRaw: tokensFor(hi), supplyRaw };
 }
+
+/** Tokens a fresh curve would give for `lamports`, and total supply (SDK quote). Used for the 30% launch cap. */
+export async function creationQuote(lamports: bigint): Promise<{ tokensRaw: bigint; supplyRaw: bigint }> {
+  const sdk = online();
+  const [global, feeConfig] = await Promise.all([
+    sol.withRetry(() => sdk.fetchGlobal()),
+    sol.withRetry(() => sdk.fetchFeeConfig()),
+  ]);
+  const supplyRaw = toBig(global.tokenTotalSupply);
+  if (supplyRaw <= 0n) throw new Error("Could not read total supply");
+  const tokensRaw = toBig(
+    getBuyTokenAmountFromSolAmount({
+      global,
+      feeConfig,
+      mintSupply: null,
+      bondingCurve: null,
+      amount: toBN(lamports),
+      quoteMint: NATIVE_MINT,
+    }),
+  );
+  return { tokensRaw, supplyRaw };
+}
