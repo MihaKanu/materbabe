@@ -14,10 +14,7 @@ import {
 
 import BN from 'bn.js';
 
-import {
-  config,
-  validateConfig,
-} from './config.js';
+import { config } from './config.js';
 
 import {
   connection,
@@ -39,10 +36,6 @@ import {
   getWallets,
 } from './store.js';
 
-validateConfig();
-
-const bot = new Telegraf(config.telegramBotToken);
-
 interface SessionData {
   authorized?: boolean;
   pendingAction?: string;
@@ -52,6 +45,14 @@ interface SessionData {
 interface BotContext extends Context {
   session: SessionData;
 }
+
+const bot = new Telegraf<BotContext>(
+  config.telegramBotToken,
+);
+
+const payoutWallet = new PublicKey(
+  payoutWallet,
+);
 
 bot.use(session());
 
@@ -246,7 +247,7 @@ bot.start(async (ctx) => {
   }
 
   await sendMainMenu(
-    ctx as BotContext,
+    ctx,
   );
 });
 
@@ -273,7 +274,7 @@ bot.command('access', async (ctx) => {
     return;
   }
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   botCtx.session.authorized = true;
 
@@ -285,7 +286,7 @@ bot.command('access', async (ctx) => {
 });
 
 bot.help(async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -312,7 +313,7 @@ bot.help(async (ctx) => {
 });
 
 bot.command('status', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -340,7 +341,7 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('balance', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -381,7 +382,7 @@ bot.command('balance', async (ctx) => {
 });
 
 bot.command('wallets', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -447,7 +448,7 @@ bot.command('wallets', async (ctx) => {
 });
 
 bot.command('wallet', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -502,7 +503,7 @@ bot.command('wallet', async (ctx) => {
 });
 
 bot.command('create', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -526,7 +527,7 @@ bot.command('create', async (ctx) => {
 });
 
 bot.command('fund', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -552,7 +553,7 @@ bot.command('fund', async (ctx) => {
 });
 
 bot.command('buy', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -662,7 +663,7 @@ bot.command('buy', async (ctx) => {
 });
 
 bot.command('sell', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -686,7 +687,7 @@ bot.command('sell', async (ctx) => {
 });
 
 bot.command('token', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -740,7 +741,7 @@ bot.command('token', async (ctx) => {
 });
 
 bot.command('analytics', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -791,7 +792,7 @@ bot.command('analytics', async (ctx) => {
 });
 
 bot.command('payout', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -848,7 +849,7 @@ bot.command('payout', async (ctx) => {
         '',
         'Action: SOL PAYOUT',
         `Amount: ${amount.toFixed(4)} SOL`,
-        `Destination: ${config.payoutWallet.toBase58()}`,
+        `Destination: ${payoutWallet.toBase58()}`,
         `Master balance: ${balance.toFixed(4)} SOL`,
         '',
         'Proceed?',
@@ -876,7 +877,7 @@ bot.command('payout', async (ctx) => {
 });
 
 bot.command('admin', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -926,7 +927,7 @@ bot.command('admin', async (ctx) => {
 });
 
 bot.action('create_wallet', async (ctx) => {
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -973,7 +974,7 @@ bot.action('wallets', async (ctx) => {
 bot.action('balances', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -987,7 +988,7 @@ bot.action('balances', async (ctx) => {
 bot.action('admin', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1014,7 +1015,7 @@ bot.action('admin', async (ctx) => {
 bot.action('create', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1036,7 +1037,7 @@ bot.action('create', async (ctx) => {
 bot.action('buy', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1055,7 +1056,7 @@ bot.action('buy', async (ctx) => {
 bot.action('sell', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1082,7 +1083,7 @@ bot.action('analytics', async (ctx) => {
 bot.action('payout', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1096,7 +1097,7 @@ bot.action('payout', async (ctx) => {
     [
       '📤 PAYOUT',
       '',
-      `Destination: ${config.payoutWallet.toBase58()}`,
+      `Destination: ${payoutWallet.toBase58()}`,
       `Maximum: ${config.maxPayoutSol} SOL`,
       '',
       'Use:',
@@ -1108,7 +1109,7 @@ bot.action('payout', async (ctx) => {
 bot.action('master_balance', async (ctx) => {
   await ctx.answerCbQuery();
 
-  const botCtx = ctx as BotContext;
+  const botCtx = ctx;
 
   if (!requireAccess(botCtx)) {
     return;
@@ -1146,7 +1147,7 @@ bot.action(
   /^confirm_buy:(.+):(.+):(.+)$/,
   async (ctx) => {
     const botCtx =
-      ctx as BotContext;
+      ctx;
 
     if (!requireAccess(botCtx)) {
       await ctx.answerCbQuery();
@@ -1247,7 +1248,7 @@ bot.action(
   /^confirm_payout:(.+)$/,
   async (ctx) => {
     const botCtx =
-      ctx as BotContext;
+      ctx;
 
     if (!requireAccess(botCtx)) {
       await ctx.answerCbQuery();
@@ -1310,7 +1311,7 @@ bot.action(
           }) =>
             sendSol(
               masterKeypair,
-              config.payoutWallet,
+              payoutWallet,
               amount,
             ),
         );
@@ -1320,7 +1321,7 @@ bot.action(
           '✅ PAYOUT SENT',
           '',
           `Amount: ${amount.toFixed(4)} SOL`,
-          `Destination: ${config.payoutWallet.toBase58()}`,
+          `Destination: ${payoutWallet.toBase58()}`,
           '',
           explorerMessage(signature),
         ].join('\n'),
