@@ -2,13 +2,17 @@ import fs from "node:fs";
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { Context, Markup, Telegraf } from "telegraf";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { config } from "./config.js";
 import * as sol from "./solana.js";
 import * as store from "./store.js";
 import * as pump from "./pump.js";
+import * as disclosure from "./disclosure.js";
 
-const bot = new Telegraf(config.telegramToken);
+const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
+const SEND_FEE_RESERVE = 30_000n; // lamports kept back for fees on MAX sends
+
+const bot = new Telegraf(config.telegramToken, { handlerTimeout: 900_000 });
 const authorized = new Set<number>();
 
 type Flow =
@@ -16,7 +20,10 @@ type Flow =
   | { kind: "payout" }
   | { kind: "create"; step: "name" | "symbol" | "uri" | "buy"; name?: string; symbol?: string; uri?: string }
   | { kind: "trade"; side: "buy" | "sell"; step: "mint" | "wallet" | "amount"; mint?: PublicKey; walletId?: string }
-  | { kind: "analytics" };
+  | { kind: "analytics" }
+  | { kind: "multi"; step: "count" | "total"; count?: number }
+  | { kind: "sellall"; step: "mint" | "pct"; mint?: PublicKey }
+  | { kind: "send"; step: "wallet" | "addr" | "amount"; walletId?: string; dest?: PublicKey };
 
 interface Confirm {
   userId: number;
@@ -90,6 +97,7 @@ async function newWallet(ctx: Context): Promise<void> {
   if (!(await owner(ctx))) return;
   const w = store.createWallet();
   console.log("Wallet created", w.id, sol.short(w.publicKey));
+  disclosure.record({ type: "wallet_created", walletId: w.id, publicKey: w.publicKey });
   await ctx.reply(
     `✅ Treasury wallet created\nWallet ID:\n${w.id}\nAddress:\n${w.publicKey}\n⚠️ This wallet is controlled by the bot.`,
   );
@@ -104,6 +112,8 @@ async function showAdmin(ctx: Context): Promise<void> {
       [Markup.button.callback("Create Treasury Wallet", "m:newwallet"), Markup.button.callback("Fund Treasury", "m:fund")],
       [Markup.button.callback("Limits", "a:limits"), Markup.button.callback("Token Analytics", "m:analytics")],
       [Markup.button.callback("Payout", "m:payout"), Markup.button.callback("Restart State", "a:reset")],
+      [Markup.button.callback("🧪 Coin Private Debug", "m:multi"), Markup.button.callback("Disclosure File", "m:disclosure")],
+      [Markup.button.callback("💥 Sell All Wallets", "m:sellall"), Markup.button.callback("📤 Send SOL Out", "m:send")],
     ]),
   );
 }
@@ -112,7 +122,7 @@ async function showStatus(ctx: Context): Promise<void> {
   if (!(await gate(ctx))) return;
   const bal = await sol.getSolBalance(config.master.publicKey);
   await ctx.reply(
-    `Network: Solana Mainnet\nRPC: ${config.rpcLabel}\nMaster: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nTreasury wallets: ${store.getWallets().length}\nSlippage: ${config.slippagePercent}%\nPump module: NOT IMPLEMENTED (create/buy/sell disabled)`,
+    `Network: Solana Mainnet\nRPC: ${config.rpcLabel}\nMaster: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nTreasury wallets: ${store.getWallets().length}\nSlippage: ${config.slippagePercent}%\nPump module: enabled (SOL-quoted bonding curve)`,
   );
 }
 
@@ -146,6 +156,29 @@ async function startTrade(ctx: Context, side: "buy" | "sell"): Promise<void> {
   if (!(await owner(ctx))) return;
   flows.set(ctx.from!.id, { kind: "trade", side, step: "mint" });
   await ctx.reply(`${side === "buy" ? "🛒 Buy" : "💸 Sell"}\nEnter token mint address:`);
+}
+async function startMulti(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "multi", step: "count" });
+  await ctx.reply("🧪 Coin Private Debug\nHow many new treasury wallets? (1-50)");
+}
+async function startSellAll(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "sellall", step: "mint" });
+  await ctx.reply("💥 Sell All Wallets\nEnter token mint address:");
+}
+async function startSend(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  const ws = store.getWallets();
+  if (ws.length === 0) return void (await ctx.reply("No treasury wallets yet."));
+  flows.set(ctx.from!.id, { kind: "send", step: "wallet" });
+  const rows = ws.map((w) => [Markup.button.callback(`${w.id} ${sol.short(w.publicKey)}`, `w:${w.id}`)]);
+  rows.push([Markup.button.callback("All wallets", "w:ALL")]);
+  await ctx.reply("📤 Send SOL out of a treasury wallet.\nSelect source:", Markup.inlineKeyboard(rows));
+}
+async function sendDisclosure(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  await ctx.replyWithDocument({ source: Buffer.from(disclosure.render()), filename: "disclosure.txt" });
 }
 async function startAnalytics(ctx: Context): Promise<void> {
   if (!(await gate(ctx))) return;
@@ -224,7 +257,7 @@ bot.command("access", async (ctx) => {
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /token /holders /analytics /payout /admin /cancel /sdk\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /token /holders /analytics /payout /admin /multi /sellall /send /disclosure /cancel /sdk\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -244,6 +277,10 @@ bot.command("sell", (ctx) => startTrade(ctx, "sell"));
 bot.command(["token", "holders", "analytics"], startAnalytics);
 bot.command("payout", startPayout);
 bot.command("admin", showAdmin);
+bot.command("multi", startMulti);
+bot.command("sellall", startSellAll);
+bot.command("send", startSend);
+bot.command("disclosure", sendDisclosure);
 bot.command("cancel", async (ctx) => {
   flows.delete(ctx.from.id);
   await ctx.reply("Cancelled.");
@@ -261,6 +298,10 @@ const routes: Record<string, (ctx: Context) => Promise<void>> = {
   admin: showAdmin,
   newwallet: newWallet,
   fund: startFund,
+  multi: startMulti,
+  sellall: startSellAll,
+  send: startSend,
+  disclosure: sendDisclosure,
 };
 bot.action(/^m:(\w+)$/, async (ctx) => {
   await ctx.answerCbQuery();
@@ -291,9 +332,22 @@ bot.action(/^w:(W\d+)$/, async (ctx) => {
   if (f.kind === "fund" && f.step === "wallet") {
     flows.set(ctx.from!.id, { kind: "fund", step: "amount", walletId: id });
     await ctx.reply(`Enter SOL amount to send to ${id} (max ${config.maxSingleFundSol}):`);
+  } else if (f.kind === "send" && f.step === "wallet") {
+    flows.set(ctx.from!.id, { kind: "send", step: "addr", walletId: id });
+    await ctx.reply("Enter destination Solana address:");
   } else if (f.kind === "trade" && f.step === "wallet") {
     flows.set(ctx.from!.id, { ...f, step: "amount", walletId: id });
     await ctx.reply(f.side === "buy" ? `Enter SOL amount (max ${config.maxSingleBuySol}):` : "Enter token amount to sell:");
+  }
+});
+
+bot.action("w:ALL", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const f = flows.get(ctx.from!.id);
+  if (f?.kind === "send" && f.step === "wallet") {
+    flows.set(ctx.from!.id, { kind: "send", step: "addr", walletId: "ALL" });
+    await ctx.reply("Enter destination Solana address:");
   }
 });
 
@@ -317,7 +371,7 @@ bot.action(/^c:([0-9a-f]+)$/, async (ctx) => {
   confirms.delete(id); // single use => double-click protection
   try {
     const out = await sol.withLock(c.lockKey, c.run);
-    await ctx.reply(out);
+    for (let i = 0; i < out.length; i += 3800) await ctx.reply(out.slice(i, i + 3800));
   } catch (e) {
     if (e instanceof sol.LockedError) {
       await ctx.reply("⏳ A transaction is already being processed for this wallet.");
@@ -365,7 +419,199 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
       "master",
       async () => {
         const sig = await sol.transferSol(config.master, new PublicKey(w.publicKey), lamports);
+        disclosure.record({ type: "funded", walletId: w.id, publicKey: w.publicKey, lamports: lamports.toString(), signature: sig });
         return `✅ Funded ${w.id} with ${sol.formatSol(lamports)} SOL\n${sol.txLink(sig)}`;
+      },
+    );
+  }
+
+  if (f.kind === "sellall") {
+    if (f.step === "mint") {
+      const mint = sol.parsePublicKey(text);
+      const curve = await pump.getCurveState(mint);
+      if (curve.graduated) {
+        flows.delete(uid);
+        return void (await ctx.reply("⚠️ This token has graduated from the bonding curve.\nBonding-curve trading is unavailable."));
+      }
+      flows.set(uid, { kind: "sellall", step: "pct", mint });
+      return void (await ctx.reply("Percent of each wallet's tokens to sell (1-100):"));
+    }
+    if (f.step === "pct" && f.mint) {
+      const mint = f.mint;
+      const pct = Number(text);
+      if (!Number.isInteger(pct) || pct < 1 || pct > 100) throw new Error("Enter a whole number from 1 to 100");
+      const rows: { id: string; raw: bigint }[] = [];
+      let total = 0n;
+      let decimals = 0;
+      for (const w of store.getWallets()) {
+        const b = await sol.getTokenBalance(new PublicKey(w.publicKey), mint);
+        decimals = b.decimals;
+        const raw = (b.raw * BigInt(pct)) / 100n;
+        if (raw > 0n) {
+          rows.push({ id: w.id, raw });
+          total += raw;
+        }
+      }
+      if (rows.length === 0) throw new Error("No treasury wallet holds this token.");
+      const q = await pump.quoteSell(mint, total, config.slippageBps);
+      flows.delete(uid);
+      const list = rows.map((r) => `${r.id}: ${sol.formatUnits(r.raw, decimals)}`).join("\n");
+      return askConfirm(
+        ctx,
+        `Action: SELL ALL WALLETS\nToken: ${mint.toBase58()}\nSelling ${pct}% from ${rows.length} wallets\n${list}\n\nTotal: ${sol.formatUnits(total, decimals)}\nEstimated proceeds: ~${sol.formatSol(q.estLamports)} SOL (price moves as wallets sell; actual may differ)\nSlippage: ${config.slippagePercent}%\nProceeds STAY in each wallet.`,
+        "sellall",
+        async () => {
+          const out: string[] = [];
+          let ok = 0;
+          for (let i = 0; i < rows.length; i += 5) {
+            const chunk = rows.slice(i, i + 5);
+            const res = await Promise.allSettled(
+              chunk.map(async (r) => {
+                const kp = store.getWalletKeypair(r.id);
+                if (!kp) throw new Error("Wallet not found");
+                return sol.withLock(`wallet:${r.id}`, () => pump.sell(mint, kp, r.raw, config.slippageBps));
+              }),
+            );
+            res.forEach((x, j) => {
+              const r = chunk[j];
+              if (x.status === "fulfilled") {
+                ok++;
+                disclosure.record({
+                  type: "sold",
+                  walletId: r.id,
+                  publicKey: store.getWallet(r.id)?.publicKey,
+                  signature: x.value,
+                  note: `sold ${sol.formatUnits(r.raw, decimals)} of ${mint.toBase58()}`,
+                });
+                out.push(`${r.id} ✅ ${sol.txLink(x.value)}`);
+              } else {
+                const why = x.reason instanceof sol.LockedError ? "busy" : sol.friendlyError(x.reason);
+                out.push(`${r.id} ❌ ${why}`);
+              }
+            });
+          }
+          return `Sell-all finished: ${ok}/${rows.length} succeeded.\nProceeds stay in each wallet.\n\n${out.join("\n")}`;
+        },
+      );
+    }
+  }
+
+  if (f.kind === "send") {
+    if (f.step === "addr") {
+      const dest = sol.parsePublicKey(text);
+      flows.set(uid, { kind: "send", step: "amount", walletId: f.walletId, dest });
+      return void (await ctx.reply(
+        f.walletId === "ALL"
+          ? "Type MAX to send every wallet's full SOL balance:"
+          : `Enter SOL amount (max ${config.maxWalletSendSol}), or MAX for the full balance:`,
+      ));
+    }
+    if (f.step === "amount" && f.dest && f.walletId) {
+      const dest = f.dest;
+      const isMax = text.trim().toUpperCase() === "MAX";
+      if (f.walletId === "ALL" && !isMax) throw new Error("For all wallets, type MAX");
+      const ids = f.walletId === "ALL" ? store.getWallets().map((w) => w.id) : [f.walletId];
+      const plan: { id: string; lamports: bigint }[] = [];
+      let sum = 0n;
+      for (const id of ids) {
+        const w = store.getWallet(id);
+        if (!w) throw new Error("Wallet not found");
+        const bal = await sol.getSolBalance(new PublicKey(w.publicKey));
+        const amt = isMax ? bal - SEND_FEE_RESERVE : sol.parseSol(text, config.maxWalletSendSol);
+        if (isMax && amt <= 0n) continue;
+        if (bal < amt + SEND_FEE_RESERVE) throw new Error(`Insufficient SOL balance in ${id}.`);
+        plan.push({ id, lamports: amt });
+        sum += amt;
+      }
+      if (plan.length === 0) throw new Error("Nothing to send.");
+      if (sum > BigInt(Math.round(config.maxWalletSendSol * 1e9))) {
+        throw new Error(`Total exceeds MAX_WALLET_SEND_SOL (${config.maxWalletSendSol}).`);
+      }
+      const destBal = await sol.getSolBalance(dest);
+      if (destBal === 0n && plan[0].lamports < sol.RENT_EXEMPT_MIN_LAMPORTS) {
+        throw new Error("Destination is a new account; first amount must be at least ~0.00089 SOL.");
+      }
+      flows.delete(uid);
+      const list = plan.map((p) => `${p.id}: ${sol.formatSol(p.lamports)} SOL`).join("\n");
+      return askConfirm(
+        ctx,
+        `Action: SEND SOL OUT\nTo (check carefully):\n${dest.toBase58()}\n\n${list}\n\nTotal: ${sol.formatSol(sum)} SOL`,
+        "sendout",
+        async () => {
+          const out: string[] = [];
+          for (const p of plan) {
+            try {
+              const kp = store.getWalletKeypair(p.id);
+              if (!kp) throw new Error("Wallet not found");
+              const sig = await sol.withLock(`wallet:${p.id}`, () => sol.transferSol(kp, dest, p.lamports));
+              disclosure.record({
+                type: "sent",
+                walletId: p.id,
+                publicKey: kp.publicKey.toBase58(),
+                lamports: p.lamports.toString(),
+                signature: sig,
+                note: `to ${dest.toBase58()}`,
+              });
+              out.push(`${p.id} ✅ ${sol.formatSol(p.lamports)} SOL ${sol.txLink(sig)}`);
+            } catch (e) {
+              out.push(`${p.id} ❌ ${e instanceof sol.LockedError ? "busy" : sol.friendlyError(e)}`);
+            }
+          }
+          return `Send finished.\n\n${out.join("\n")}`;
+        },
+      );
+    }
+  }
+
+  if (f.kind === "multi") {
+    if (f.step === "count") {
+      const n = Number(text);
+      if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("Enter a whole number from 1 to 50");
+      flows.set(uid, { kind: "multi", step: "total", count: n });
+      return void (await ctx.reply(
+        `Total SOL to split across ${n} wallets (max ${config.maxMultiTotalSol}, min ${sol.formatSol(MIN_PER_WALLET * BigInt(n))}):`,
+      ));
+    }
+    const n = f.count ?? 0;
+    const total = sol.parseSol(text, config.maxMultiTotalSol);
+    const bal = await sol.getSolBalance(config.master.publicKey);
+    if (bal < total + sol.FEE_BUFFER_LAMPORTS) throw new Error("Insufficient master-wallet balance.");
+    const shares = sol.randomSplit(total, n, MIN_PER_WALLET);
+    flows.delete(uid);
+    const preview = shares
+      .map((s, i) => `#${i + 1}: ${(Number((s * 10000n) / total) / 100).toFixed(2)}% (${sol.formatSol(s)} SOL)`)
+      .join("\n");
+    return askConfirm(
+      ctx,
+      `Action: COIN PRIVATE DEBUG\nNew treasury wallets: ${n}\nTotal: ${sol.formatSol(total)} SOL\nRandom split:\n${preview}\n\nWallets stay operator-controlled and are recorded in the disclosure file.`,
+      "master",
+      async () => {
+        const wallets = store.createWallets(n);
+        for (const w of wallets) disclosure.record({ type: "wallet_created", walletId: w.id, publicKey: w.publicKey });
+        const lines: string[] = [];
+        let err = "";
+        for (let i = 0; i < wallets.length; i += 10) {
+          const slice = wallets.slice(i, i + 10);
+          try {
+            const ixs = slice.map((w, j) =>
+              SystemProgram.transfer({
+                fromPubkey: config.master.publicKey,
+                toPubkey: new PublicKey(w.publicKey),
+                lamports: shares[i + j],
+              }),
+            );
+            const sig = await sol.sendTx(ixs, [config.master]);
+            slice.forEach((w, j) => {
+              disclosure.record({ type: "funded", walletId: w.id, publicKey: w.publicKey, lamports: shares[i + j].toString(), signature: sig });
+              lines.push(`${w.id} ${sol.short(w.publicKey)} ${sol.formatSol(shares[i + j])} SOL`);
+            });
+          } catch (e) {
+            err = sol.friendlyError(e);
+            slice.forEach((w) => lines.push(`${w.id} ${sol.short(w.publicKey)} NOT FUNDED`));
+            break;
+          }
+        }
+        return `${err ? `⚠️ Stopped early: ${err}\n` : "✅ "}Coin Private Debug wallets\n${lines.join("\n")}\n\nRecorded. Use /disclosure to export the public file.`;
       },
     );
   }
