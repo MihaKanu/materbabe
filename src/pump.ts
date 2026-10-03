@@ -116,7 +116,13 @@ export async function quoteBuy(mint: PublicKey, lamports: bigint, _bps: number):
   return { estTokensRaw: toBig(amount) };
 }
 
-export async function buy(mint: PublicKey, wallet: Keypair, lamports: bigint, bps: number): Promise<string> {
+export async function buy(
+  mint: PublicKey,
+  wallet: Keypair,
+  lamports: bigint,
+  bps: number,
+  feePayer?: Keypair,
+): Promise<string> {
   const { tokenProgram, state, global, feeConfig } = await loadBuy(mint, wallet.publicKey);
   requireTradable(state.quoteMint, state.bondingCurve.complete);
   const solAmount = toBN(lamports);
@@ -140,7 +146,7 @@ export async function buy(mint: PublicKey, wallet: Keypair, lamports: bigint, bp
     slippage: bps / 100, // ASSUMED percent; unit not shown in declarations
     tokenProgram,
   });
-  return sol.sendTx(ixs, [wallet]);
+  return sol.sendTx(ixs, feePayer ? [feePayer, wallet] : [wallet]);
 }
 
 async function loadSell(mint: PublicKey, user: PublicKey) {
@@ -167,7 +173,13 @@ export async function quoteSell(mint: PublicKey, raw: bigint, _bps: number): Pro
   return { estLamports: toBig(out) };
 }
 
-export async function sell(mint: PublicKey, wallet: Keypair, raw: bigint, bps: number): Promise<string> {
+export async function sell(
+  mint: PublicKey,
+  wallet: Keypair,
+  raw: bigint,
+  bps: number,
+  feePayer?: Keypair,
+): Promise<string> {
   const { tokenProgram, state, global, feeConfig } = await loadSell(mint, wallet.publicKey);
   requireTradable(state.quoteMint, state.bondingCurve.complete);
   const amount = toBN(raw);
@@ -191,7 +203,7 @@ export async function sell(mint: PublicKey, wallet: Keypair, raw: bigint, bps: n
     mayhemMode: state.bondingCurve.isMayhemMode,
     cashback: state.bondingCurve.isCashbackCoin,
   });
-  return sol.sendTx(ixs, [wallet]);
+  return sol.sendTx(ixs, feePayer ? [feePayer, wallet] : [wallet]);
 }
 
 export async function createCoin(p: CreateParams): Promise<{ mint: string; signature: string }> {
@@ -228,4 +240,37 @@ export async function createCoin(p: CreateParams): Promise<{ mint: string; signa
   const signature = await sol.sendTx(ixs, [p.creator, mintKp]);
   console.log("Coin created", sol.short(mintKp.publicKey));
   return { mint: mintKp.publicKey.toBase58(), signature };
+}
+
+/** SOL needed (at creation) to buy `pct10`/10 percent of total supply. Uses the SDK quote, solved by bisection. */
+export async function quoteAllocation(
+  pct10: number,
+): Promise<{ lamports: bigint; tokensRaw: bigint; supplyRaw: bigint }> {
+  const sdk = online();
+  const [global, feeConfig] = await Promise.all([
+    sol.withRetry(() => sdk.fetchGlobal()),
+    sol.withRetry(() => sdk.fetchFeeConfig()),
+  ]);
+  const supplyRaw = toBig(global.tokenTotalSupply);
+  const target = (supplyRaw * BigInt(pct10)) / 1000n;
+  const tokensFor = (l: bigint): bigint =>
+    toBig(
+      getBuyTokenAmountFromSolAmount({
+        global,
+        feeConfig,
+        mintSupply: null,
+        bondingCurve: null,
+        amount: toBN(l),
+        quoteMint: NATIVE_MINT,
+      }),
+    );
+  let lo = 1n;
+  let hi = 10_000n * 1_000_000_000n;
+  if (tokensFor(hi) < target) throw new Error("Allocation is not reachable on the bonding curve.");
+  while (lo < hi) {
+    const mid = (lo + hi) / 2n;
+    if (tokensFor(mid) >= target) hi = mid;
+    else lo = mid + 1n;
+  }
+  return { lamports: hi, tokensRaw: tokensFor(hi), supplyRaw };
 }
