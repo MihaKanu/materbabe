@@ -224,7 +224,7 @@ bot.command("access", async (ctx) => {
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /token /holders /analytics /payout /admin /cancel\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /token /holders /analytics /payout /admin /cancel /sdk\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -329,9 +329,9 @@ bot.action(/^c:([0-9a-f]+)$/, async (ctx) => {
 });
 
 // ---------- text input for flows ----------
-bot.on("text", async (ctx) => {
+bot.on("text", async (ctx, next) => {
   const text = ctx.message.text.trim();
-  if (text.startsWith("/")) return;
+  if (text.startsWith("/")) return next();
   const uid = ctx.from.id;
   const f = flows.get(uid);
   if (!f) return;
