@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { Context, Markup, Telegraf } from "telegraf";
@@ -477,6 +478,33 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     }
   }
 }
+
+// TEMPORARY: dumps installed SDK declarations to Telegram. Remove after pump.ts is written.
+bot.command("sdk", async (ctx) => {
+  if (!(await owner(ctx))) return;
+  const dir = "node_modules/@pump-fun/pump-sdk";
+  const pkg = JSON.parse(fs.readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
+  const lines = fs.readFileSync(`${dir}/dist/index.d.ts`, "utf8").split("\n");
+  let out = `SDK version ${pkg.version}\n\nMETHOD NAMES:\n`;
+  const seen = new Set<string>();
+  for (const l of lines) {
+    const m = /^\s{4}(?:async )?([A-Za-z0-9_]+)[(<]/.exec(l);
+    if (m && /buy|sell|create|quote|global|fee/i.test(m[1]) && !seen.has(m[1])) seen.add(m[1]);
+  }
+  out += [...seen].join(", ") + "\n\n";
+  const names = ["createV2Instruction","createV2AndBuyInstructions","buyInstructions","sellInstructions","fetchBuyState","fetchSellState","fetchGlobal","fetchFeeConfig"];
+  for (const n of names) {
+    const re = new RegExp(`^\\s+(?:async )?${n}[(<]`);
+    lines.forEach((l, i) => {
+      if (re.test(l)) out += `--- ${n} @${i + 1}\n${lines.slice(i, i + 20).join("\n")}\n\n`;
+    });
+  }
+  lines.forEach((l, i) => {
+    if (/^(declare )?(interface|type) BondingCurve\b/.test(l)) out += `--- BondingCurve\n${lines.slice(i, i + 30).join("\n")}\n`;
+    if (/^declare function getBuyTokenAmountFromSolAmount/.test(l)) out += `--- getBuyTokenAmountFromSolAmount\n${lines.slice(i, i + 12).join("\n")}\n`;
+  });
+  for (let i = 0; i < out.length; i += 3800) await ctx.reply(out.slice(i, i + 3800));
+});
 
 bot.catch((err) => console.error("Bot error:", err instanceof Error ? err.message : "unknown"));
 
