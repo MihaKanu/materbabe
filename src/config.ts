@@ -1,4 +1,5 @@
 import "dotenv/config";
+import path from "node:path";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 
@@ -46,6 +47,11 @@ try {
 }
 
 const masterKeypair = loadMaster(req("MASTER_SECRET"));
+const storeKey = req("WALLET_STORE_KEY");
+if (storeKey.length < 16) throw new Error("WALLET_STORE_KEY must be at least 16 characters.");
+const dataDir =
+  process.env.DATA_DIR?.trim() ||
+  (process.env.WALLET_STORE_PATH ? path.dirname(process.env.WALLET_STORE_PATH.trim()) : "./data");
 const slippagePercent = positive("SLIPPAGE_PERCENT", "1");
 if (slippagePercent > 10) throw new Error("SLIPPAGE_PERCENT above 10 is refused.");
 
@@ -61,12 +67,14 @@ export const config = {
   maxSingleBuySol: positive("MAX_SINGLE_BUY_SOL"),
   maxPayoutSol: positive("MAX_PAYOUT_SOL"),
   maxSingleFundSol: positive("MAX_SINGLE_FUND_SOL", "1"),
-  maxWalletSendSol: positive("MAX_WALLET_SEND_SOL", "50"),
-  maxMultiTotalSol: positive("MAX_MULTI_TOTAL_SOL", "5"),
+  maxWalletSendSol: positive("MAX_WALLET_SEND_SOL", "1000"),
+  maxMultiTotalSol: positive("MAX_MULTI_TOTAL_SOL", "1000"),
   slippagePercent,
   slippageBps: Math.round(slippagePercent * 100),
-  storePath: process.env.WALLET_STORE_PATH?.trim() || "./data/wallets.json",
-  storeKey: process.env.WALLET_STORE_KEY?.trim() || "",
+  dataDir,
+  storeKey, // also the seed that derives every wallet key: back it up!
+  publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").trim().replace(/\/$/, ""),
+  maxAllocationSol: positive("MAX_ALLOCATION_SOL", "40"),
   port: Number(process.env.PORT) || 3000,
   monitorBand: { min: 18, max: 26 },
 } as const;
