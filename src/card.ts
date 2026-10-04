@@ -30,6 +30,21 @@ export function setCharacter(buf: Buffer, ext: "png" | "jpg"): void {
   for (const e of ["png", "jpg"]) fs.rmSync(path.join(config.dataDir, `character.${e}`), { force: true });
   fs.writeFileSync(path.join(config.dataDir, `character.${ext}`), buf);
 }
+export function setBackground(buf: Buffer, ext: "png" | "jpg"): void {
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  clearBackground();
+  fs.writeFileSync(path.join(config.dataDir, `background.${ext}`), buf);
+}
+export function clearBackground(): void {
+  for (const e of ["png", "jpg"]) fs.rmSync(path.join(config.dataDir, `background.${e}`), { force: true });
+}
+function loadBackground(): string | undefined {
+  for (const e of ["png", "jpg"]) {
+    const f = path.join(config.dataDir, `background.${e}`);
+    if (fs.existsSync(f)) return dataUri(fs.readFileSync(f), e);
+  }
+  return undefined;
+}
 function loadCharacter(): string | undefined {
   for (const e of ["png", "jpg"]) {
     const f = path.join(config.dataDir, `character.${e}`);
@@ -63,6 +78,7 @@ export async function renderCard(p: {
   pnl: string;
   profit: boolean;
   example?: boolean;
+  username?: string;
 }): Promise<Buffer> {
   const hasFont = await ensureFont();
   const svg = buildCardSvg({
@@ -72,8 +88,10 @@ export async function renderCard(p: {
     pnl: p.pnl,
     profit: p.profit,
     example: p.example,
+    username: p.username,
     coinImage: await loadCoinImage(p.image),
     character: loadCharacter(),
+    background: loadBackground(),
   });
   const resvg = new Resvg(svg, {
     fitTo: { mode: "width", value: 1920 },
@@ -82,4 +100,19 @@ export async function renderCard(p: {
       : { loadSystemFonts: true },
   });
   return resvg.render().asPng();
+}
+
+/** Ticker and picture for coins the bot did not create, from DexScreener's public API. */
+export async function lookupCoin(mint: string): Promise<{ symbol?: string; image?: string }> {
+  try {
+    const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { signal: AbortSignal.timeout(8_000) });
+    if (!r.ok) return {};
+    const j = (await r.json()) as {
+      pairs?: { baseToken?: { address?: string; symbol?: string }; info?: { imageUrl?: string } }[];
+    };
+    const p = j.pairs?.find((x) => x.baseToken?.address === mint) ?? j.pairs?.[0];
+    return { symbol: p?.baseToken?.symbol, image: p?.info?.imageUrl };
+  } catch {
+    return {};
+  }
 }
