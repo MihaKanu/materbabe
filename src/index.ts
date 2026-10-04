@@ -63,7 +63,7 @@ type Flow =
   | { kind: "export" }
   | { kind: "cardimg" }
   | { kind: "cardbg" }
-  | { kind: "larp"; step: "coin" | "mult" | "pnl"; mint?: PublicKey; mult?: string }
+  | { kind: "larp"; step: "coin" | "mult" | "pnl" | "bg"; mint?: PublicKey; mult?: string; pnl?: string; profit?: boolean }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -135,6 +135,7 @@ const menuKb = () =>
     [Markup.button.callback("📊 Token Analytics", "m:analytics"), Markup.button.callback("📤 Payout", "m:payout")],
     [Markup.button.callback("📤 Send SOL Out", "m:send"), Markup.button.callback("⚙️ Admin", "m:admin")],
     [Markup.button.callback("📈 Live Panel", "m:panel"), Markup.button.callback("🔐 Export Wallets", "m:export")],
+    [Markup.button.callback("🖼 Card Background", "m:cardbg"), Markup.button.callback("🎭 Example Card", "m:larp")],
     [Markup.button.callback("🧹 Clear Chat", "m:clear"), Markup.button.callback("📄 Disclosure", "m:disclosure")],
   ]);
 
@@ -877,6 +878,36 @@ function signedUsd(l: bigint, price: number | null): string {
 }
 const symbolOf = (mint: PublicKey): string => store.getCoins().find((c) => c.mint === mint.toBase58())?.symbol ?? sol.short(mint);
 
+async function renderLarp(ctx: Context, uid: number): Promise<void> {
+  const f = flows.get(uid);
+  if (f?.kind !== "larp" || f.step !== "bg" || !f.mint) return;
+  flows.delete(uid);
+  const coin = await coinForCard(f.mint);
+  const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl: f.pnl ?? "", profit: f.profit ?? true, example: true, username: ctx.from?.username });
+  await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." });
+}
+async function startLarp(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "larp", step: "coin" });
+  await askCoin(ctx, "🎭 Example card (labeled EXAMPLE)");
+}
+async function startCardBg(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  await ctx.reply("Card background:", Markup.inlineKeyboard([[Markup.button.callback("Grey (default)", "g:grey"), Markup.button.callback("Upload my image", "g:upload")]]));
+}
+bot.action(/^lb:(grey|keep|upload)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const uid = ctx.from!.id;
+  const choice = ctx.match[1];
+  if (choice === "upload") {
+    flows.set(uid, { kind: "cardbg" });
+    return void (await ctx.reply("Send your background image (file or photo), then run /larp again."));
+  }
+  if (choice === "grey") card.clearBackground();
+  await safe(ctx, () => renderLarp(ctx, uid));
+});
+
 async function coinForCard(mint: PublicKey): Promise<{ symbol: string; image?: string }> {
   const saved = store.getCoins().find((c) => c.mint === mint.toBase58());
   if (saved) return { symbol: saved.symbol, image: saved.image };
@@ -1123,6 +1154,8 @@ const routes: Record<string, (ctx: Context) => Promise<void>> = {
   send: startSend,
   disclosure: sendDisclosure,
   panel: startPanelCmd,
+  cardbg: startCardBg,
+  larp: startLarp,
   export: startExport,
   clear: (c) =>
     clearChat(c, (c.callbackQuery && "message" in c.callbackQuery ? c.callbackQuery.message?.message_id : undefined) ?? 0),
@@ -1318,10 +1351,11 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     if (!Number.isFinite(v) || Math.abs(v) > 1e9) throw new Error("Enter a number like 15000 or -250");
     const abs = Math.abs(v);
     const pnl = `${v >= 0 ? "+" : "-"}$${abs >= 1000 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(2)}`;
-    const coin = await coinForCard(f.mint);
-    flows.delete(uid);
-    const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl, profit: v >= 0, example: true, username: ctx.from?.username });
-    return void (await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." }));
+    flows.set(uid, { kind: "larp", step: "bg", mint: f.mint, mult: f.mult, pnl, profit: v >= 0 });
+    return void (await ctx.reply(
+      "Pick the card background:",
+      Markup.inlineKeyboard([[Markup.button.callback("Grey", "lb:grey"), Markup.button.callback("Keep current", "lb:keep"), Markup.button.callback("Upload image", "lb:upload")]]),
+    ));
   }
 
   if (f.kind === "export") {
