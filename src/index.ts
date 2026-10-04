@@ -62,6 +62,7 @@ type Flow =
   | { kind: "panel"; step: "coin" | "mint" }
   | { kind: "export" }
   | { kind: "cardimg" }
+  | { kind: "cardbg" }
   | { kind: "larp"; step: "coin" | "mult" | "pnl"; mint?: PublicKey; mult?: string }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
@@ -357,7 +358,7 @@ async function onMint(ctx: Context, uid: number, f: Flow, mint: PublicKey): Prom
   }
   if (f.kind === "larp") {
     flows.set(uid, { kind: "larp", step: "mult", mint });
-    return void (await ctx.reply("Enter the multiplier to show on the card (e.g. 25 or 2.5):"));
+    return void (await ctx.reply("Enter the multiplier to show on the card (1 to 9999999, e.g. 25 or 2.5):"));
   }
   if (f.kind === "trade") {
     const c = await pump.getCurveState(mint);
@@ -542,8 +543,8 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
               pnl = `${sign}${sol.formatSol(diff)} SOL`;
             }
           }
-          const coin = store.getCoins().find((c) => c.mint === mint.toBase58());
-          photo = await card.renderCard({ symbol: coin?.symbol ?? "", image: coin?.image, multiplier, pnl, profit });
+          const coin = await coinForCard(mint);
+          photo = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier, pnl, profit, username: ctx.from?.username });
         } catch (e) {
           console.error("Card render failed:", e instanceof Error ? e.message : "unknown");
         }
@@ -876,6 +877,13 @@ function signedUsd(l: bigint, price: number | null): string {
 }
 const symbolOf = (mint: PublicKey): string => store.getCoins().find((c) => c.mint === mint.toBase58())?.symbol ?? sol.short(mint);
 
+async function coinForCard(mint: PublicKey): Promise<{ symbol: string; image?: string }> {
+  const saved = store.getCoins().find((c) => c.mint === mint.toBase58());
+  if (saved) return { symbol: saved.symbol, image: saved.image };
+  const info = await card.lookupCoin(mint.toBase58());
+  return { symbol: info.symbol ?? "", image: info.image };
+}
+
 async function pnlCard(mint: PublicKey): Promise<string> {
   const pos = store.getPosition(mint.toBase58());
   if (!pos) return "";
@@ -1030,7 +1038,7 @@ bot.start(showMenu);
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /larp /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /larp /cardbg /cardimage /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -1061,6 +1069,23 @@ bot.command("larp", async (ctx) => {
   if (!(await owner(ctx))) return;
   flows.set(ctx.from.id, { kind: "larp", step: "coin" });
   await askCoin(ctx, "🎭 Example card (labeled EXAMPLE)");
+});
+bot.command("cardbg", async (ctx) => {
+  if (!(await owner(ctx))) return;
+  await ctx.reply(
+    "Card background:",
+    Markup.inlineKeyboard([[Markup.button.callback("Grey (default)", "g:grey"), Markup.button.callback("Upload my image", "g:upload")]]),
+  );
+});
+bot.action(/^g:(grey|upload)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  if (ctx.match[1] === "grey") {
+    card.clearBackground();
+    return void (await ctx.reply("✅ Background set to grey."));
+  }
+  flows.set(ctx.from!.id, { kind: "cardbg" });
+  await ctx.reply("Send your background image (as a file or a normal photo). It is darkened a little so the text stays readable.");
 });
 bot.command("cardimage", async (ctx) => {
   if (!(await owner(ctx))) return;
@@ -1212,25 +1237,32 @@ bot.action(/^c:([0-9a-f]+)$/, async (ctx) => {
 });
 
 // ---------- photo + text input ----------
-async function saveCharacter(ctx: Context, fileId: string, ext: "png" | "jpg"): Promise<void> {
+async function saveCharacter(ctx: Context, fileId: string, ext: "png" | "jpg", target: "character" | "background" = "character"): Promise<void> {
   const link = await ctx.telegram.getFileLink(fileId);
   const res = await fetch(link.href);
   if (!res.ok) throw new Error("Could not download the image");
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length > 8_000_000) throw new Error("Image is larger than 8 MB");
-  card.setCharacter(buf, ext);
-  await ctx.reply("✅ Sell card picture saved.");
+  if (target === "background") card.setBackground(buf, ext);
+  else card.setCharacter(buf, ext);
+  await ctx.reply(target === "background" ? "✅ Card background saved. Use /cardbg to switch back to grey." : "✅ Sell card picture saved.");
 }
 bot.on("document", async (ctx) => {
   const uid = ctx.from.id;
-  if (uid !== config.ownerTelegramId || flows.get(uid)?.kind !== "cardimg") return;
+  const k = flows.get(uid)?.kind;
+  if (uid !== config.ownerTelegramId || (k !== "cardimg" && k !== "cardbg")) return;
   flows.delete(uid);
   const d = ctx.message.document;
-  await safe(ctx, () => saveCharacter(ctx, d.file_id, d.mime_type === "image/png" ? "png" : "jpg"));
+  await safe(ctx, () => saveCharacter(ctx, d.file_id, d.mime_type === "image/png" ? "png" : "jpg", k === "cardbg" ? "background" : "character"));
 });
 bot.on("photo", async (ctx) => {
   const uid = ctx.from.id;
   const f = flows.get(uid);
+  if (uid === config.ownerTelegramId && f?.kind === "cardbg") {
+    flows.delete(uid);
+    const ph = ctx.message.photo[ctx.message.photo.length - 1];
+    return void (await safe(ctx, () => saveCharacter(ctx, ph.file_id, "jpg", "background")));
+  }
   if (uid === config.ownerTelegramId && f?.kind === "cardimg") {
     flows.delete(uid);
     const ph = ctx.message.photo[ctx.message.photo.length - 1];
@@ -1275,7 +1307,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
 
   if (f.kind === "larp" && f.step === "mult") {
     const n = Number(text.replace(/x$/i, ""));
-    if (!Number.isFinite(n) || n <= 0 || n > 1_000_000) throw new Error("Enter a multiplier like 25 or 2.5");
+    if (!Number.isFinite(n) || n < 1 || n > 9_999_999) throw new Error("Enter a multiplier from 1 to 9999999, like 25 or 2.5");
     let mt = n >= 10 ? String(Math.round(n)) : n.toFixed(2);
     if (mt.includes(".")) mt = mt.replace(/0+$/, "").replace(/\.$/, "");
     flows.set(uid, { kind: "larp", step: "pnl", mint: f.mint, mult: `${mt}x` });
@@ -1286,9 +1318,9 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     if (!Number.isFinite(v) || Math.abs(v) > 1e9) throw new Error("Enter a number like 15000 or -250");
     const abs = Math.abs(v);
     const pnl = `${v >= 0 ? "+" : "-"}$${abs >= 1000 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(2)}`;
-    const coin = store.getCoins().find((c) => c.mint === f.mint!.toBase58());
+    const coin = await coinForCard(f.mint);
     flows.delete(uid);
-    const png = await card.renderCard({ symbol: coin?.symbol ?? "", image: coin?.image, multiplier: f.mult ?? "", pnl, profit: v >= 0, example: true });
+    const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl, profit: v >= 0, example: true, username: ctx.from?.username });
     return void (await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." }));
   }
 
