@@ -14,7 +14,10 @@ import * as card from "./card.js";
 import { startServer } from "./server.js";
 
 const bot = new Telegraf(config.telegramToken, { handlerTimeout: 900_000 });
-const authorized = new Set<number>();
+bot.use(async (ctx, next) => {
+  if (ctx.from?.id !== config.ownerTelegramId) return; // ignore everyone except the owner
+  return next();
+});
 
 const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
 const TOP_HOLDER_WALLETS = 10;
@@ -59,6 +62,7 @@ type Flow =
   | { kind: "panel"; step: "coin" | "mint" }
   | { kind: "export" }
   | { kind: "cardimg" }
+  | { kind: "larp"; step: "coin" | "mult" | "pnl"; mint?: PublicKey; mult?: string }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -68,11 +72,9 @@ const flows = new Map<number, Flow>();
 const confirms = new Map<string, Confirm>();
 
 // ---------- helpers ----------
+// Only the owner's numeric Telegram ID can use the bot. Everyone else is silently ignored.
 async function gate(ctx: Context): Promise<boolean> {
-  const id = ctx.from?.id;
-  if (id && authorized.has(id)) return true;
-  await ctx.reply("🔐 MaterBabe Coin Kirkinator\nAccess required.\nUse:\n/access <key>");
-  return false;
+  return ctx.from?.id === config.ownerTelegramId;
 }
 async function owner(ctx: Context): Promise<boolean> {
   if (!(await gate(ctx))) return false;
@@ -352,6 +354,10 @@ async function onMint(ctx: Context, uid: number, f: Flow, mint: PublicKey): Prom
   if (f.kind === "panel") {
     flows.delete(uid);
     return startPanel(ctx, uid, mint);
+  }
+  if (f.kind === "larp") {
+    flows.set(uid, { kind: "larp", step: "mult", mint });
+    return void (await ctx.reply("Enter the multiplier to show on the card (e.g. 25 or 2.5):"));
   }
   if (f.kind === "trade") {
     const c = await pump.getCurveState(mint);
@@ -892,6 +898,7 @@ interface Panel {
   lastHold: number;
   ticks: number;
   busy: boolean;
+  lastError?: string;
   timer: ReturnType<typeof setInterval>;
 }
 const panels = new Map<number, Panel>();
@@ -902,8 +909,11 @@ const spark = (a: number[]): string => {
   const hi = Math.max(...a);
   return a.map((v) => SPARK[hi === lo ? 0 : Math.min(7, Math.floor(((v - lo) / (hi - lo)) * 7.999))]).join("");
 };
-const panelKb = () =>
+const chartUrl = (mint: PublicKey, embed: boolean): string =>
+  `https://dexscreener.com/solana/${mint.toBase58()}?${embed ? "embed=1&theme=dark&trades=0&info=0&" : ""}interval=1S`;
+const panelKb = (mint: PublicKey) =>
   Markup.inlineKeyboard([
+    [Markup.button.webApp("📊 Live chart (1s)", chartUrl(mint, true)), Markup.button.url("🌐 Browser", chartUrl(mint, false))],
     [1, 5, 10, 15].map((n) => Markup.button.callback(`${n}%`, `v:${n}`)),
     [25, 50, 75, 100].map((n) => Markup.button.callback(`${n}%`, `v:${n}`)),
     [Markup.button.callback("⏹ Stop", "v:stop")],
@@ -944,16 +954,27 @@ async function tick(uid: number): Promise<void> {
     const pct = spent > 0n ? `${((Number(pnl) / Number(spent)) * 100).toFixed(1)}%` : "n/a";
     const mult = spent > 0n ? `${(Number(est + realized) / Number(spent)).toFixed(2)}x` : "n/a";
     const text = `📈 ${symbolOf(p.mint)} LIVE\n${spark(p.samples)}\nPrice: ${c.priceSol.toPrecision(5)} SOL\nMkt cap: ${sol.formatSol(c.mcapLamports, 2)} SOL (${usdFmt(c.mcapLamports, price)})\nHeld: ${sol.formatUnits(p.total, p.decimals, 2)} in ${p.wallets} wallets\nCost basis: ${sol.formatSol(spent)} SOL (${usdFmt(spent, price)})\nEst. value: ${sol.formatSol(est)} SOL (${usdFmt(est, price)})\nP&L: ${signedUsd(pnl, price)} (${pct}) · ${mult}${c.graduated ? "\n⚠️ Graduated: bonding-curve selling unavailable." : ""}\n\nRefreshes about every 4s. Sell buttons ask you to confirm first.`;
-    await bot.telegram.editMessageText(p.chatId, p.messageId, undefined, text, { reply_markup: panelKb().reply_markup });
-  } catch {
-    /* unchanged text or transient RPC error: skip this tick */
+    p.lastError = undefined;
+    await bot.telegram
+      .editMessageText(p.chatId, p.messageId, undefined, text, { reply_markup: panelKb(p.mint).reply_markup })
+      .catch((e: unknown) => {
+        if (!/not modified/i.test(String(e))) throw e;
+      });
+  } catch (e) {
+    const msg = `📈 ${symbolOf(p.mint)}\n⚠️ Could not load live data: ${sol.friendlyError(e)}\nRetrying every 4s. The chart button still works.`;
+    if (msg !== p.lastError) {
+      p.lastError = msg;
+      await bot.telegram
+        .editMessageText(p.chatId, p.messageId, undefined, msg, { reply_markup: panelKb(p.mint).reply_markup })
+        .catch(() => undefined);
+    }
   } finally {
     p.busy = false;
   }
 }
 async function startPanel(ctx: Context, uid: number, mint: PublicKey): Promise<void> {
   stopPanel(uid);
-  const m = await ctx.reply("📈 Loading live panel…", panelKb());
+  const m = await ctx.reply("📈 Loading live panel…", panelKb(mint));
   panels.set(uid, {
     chatId: m.chat.id,
     messageId: m.message_id,
@@ -1005,28 +1026,11 @@ async function doExport(ctx: Context): Promise<void> {
 }
 
 // ---------- commands ----------
-bot.start(async (ctx) => {
-  if (ctx.from && authorized.has(ctx.from.id)) return showMenu(ctx);
-  await ctx.reply("🔐 MaterBabe Coin Kirkinator\nAccess required.\nUse:\n/access <key>");
-});
-bot.command("access", async (ctx) => {
-  const key = ctx.message.text.split(/\s+/).slice(1).join(" ");
-  try {
-    await ctx.deleteMessage();
-  } catch {
-    /* ignore */
-  }
-  if (key && key === config.accessKey) {
-    authorized.add(ctx.from.id);
-    await ctx.reply("✅ Access granted.");
-    return showMenu(ctx);
-  }
-  await ctx.reply("❌ Invalid key.");
-});
+bot.start(showMenu);
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /larp /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -1053,6 +1057,11 @@ bot.command("send", startSend);
 bot.command("disclosure", sendDisclosure);
 bot.command("panel", startPanelCmd);
 bot.command("export", startExport);
+bot.command("larp", async (ctx) => {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from.id, { kind: "larp", step: "coin" });
+  await askCoin(ctx, "🎭 Example card (labeled EXAMPLE)");
+});
 bot.command("cardimage", async (ctx) => {
   if (!(await owner(ctx))) return;
   flows.set(ctx.from.id, { kind: "cardimg" });
@@ -1239,7 +1248,6 @@ bot.on("text", async (ctx, next) => {
   const uid = ctx.from.id;
   const f = flows.get(uid);
   if (!f) return;
-  if (!authorized.has(uid)) return void (await gate(ctx));
   await safe(ctx, () => handleFlow(ctx, uid, f, text));
 });
 
@@ -1252,7 +1260,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
 
   const wantsMint =
     (f.kind === "trade" && f.step === "mint") ||
-    ((f.kind === "sellall" || f.kind === "burn" || f.kind === "panel") && (f.step === "coin" || f.step === "mint"));
+    ((f.kind === "sellall" || f.kind === "burn" || f.kind === "panel" || f.kind === "larp") && (f.step === "coin" || f.step === "mint"));
   if (wantsMint) return onMint(ctx, uid, f, sol.parsePublicKey(text));
 
   if ((f.kind === "fund" || f.kind === "send" || f.kind === "trade") && f.step === "wallet" && /^(M|ALL|[WC]\d+)$/i.test(text)) {
@@ -1263,6 +1271,25 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     const pct = Number(text);
     if (!Number.isInteger(pct) || pct < 1 || pct > 100) throw new Error("Enter a whole number from 1 to 100");
     return onPercent(ctx, uid, f, pct);
+  }
+
+  if (f.kind === "larp" && f.step === "mult") {
+    const n = Number(text.replace(/x$/i, ""));
+    if (!Number.isFinite(n) || n <= 0 || n > 1_000_000) throw new Error("Enter a multiplier like 25 or 2.5");
+    let mt = n >= 10 ? String(Math.round(n)) : n.toFixed(2);
+    if (mt.includes(".")) mt = mt.replace(/0+$/, "").replace(/\.$/, "");
+    flows.set(uid, { kind: "larp", step: "pnl", mint: f.mint, mult: `${mt}x` });
+    return void (await ctx.reply("Enter the P&L in USD to show (e.g. 15000 or -250):"));
+  }
+  if (f.kind === "larp" && f.step === "pnl" && f.mint) {
+    const v = Number(text.replace(/[$,\s]/g, ""));
+    if (!Number.isFinite(v) || Math.abs(v) > 1e9) throw new Error("Enter a number like 15000 or -250");
+    const abs = Math.abs(v);
+    const pnl = `${v >= 0 ? "+" : "-"}$${abs >= 1000 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(2)}`;
+    const coin = store.getCoins().find((c) => c.mint === f.mint!.toBase58());
+    flows.delete(uid);
+    const png = await card.renderCard({ symbol: coin?.symbol ?? "", image: coin?.image, multiplier: f.mult ?? "", pnl, profit: v >= 0, example: true });
+    return void (await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." }));
   }
 
   if (f.kind === "export") {
