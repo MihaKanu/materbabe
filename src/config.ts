@@ -58,7 +58,6 @@ if (slippagePercent > 10) throw new Error("SLIPPAGE_PERCENT above 10 is refused.
 export const config = {
   telegramToken: req("TELEGRAM_BOT_TOKEN"),
   ownerTelegramId: ownerId,
-  accessKey: req("ACCESS_KEY"),
   network: req("SOLANA_NETWORK"),
   rpcUrl,
   rpcLabel: rpcHost, // host only; never log rpcUrl itself
