@@ -62,6 +62,7 @@ export async function renderCard(p: {
   multiplier: string;
   pnl: string;
   profit: boolean;
+  example?: boolean;
 }): Promise<Buffer> {
   const hasFont = await ensureFont();
   const svg = buildCardSvg({
@@ -70,6 +71,7 @@ export async function renderCard(p: {
     multiplier: p.multiplier,
     pnl: p.pnl,
     profit: p.profit,
+    example: p.example,
     coinImage: await loadCoinImage(p.image),
     character: loadCharacter(),
   });
