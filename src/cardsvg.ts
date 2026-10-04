@@ -6,6 +6,7 @@ export interface CardData {
   profit: boolean;
   coinImage?: string; // data URI
   character?: string; // data URI
+  example?: boolean; // adds a permanent EXAMPLE tag (used by /larp)
 }
 
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -32,5 +33,6 @@ export function buildCardSvg(d: CardData): string {
   ${d.symbol ? `<text x="384" y="1013" font-size="${symSize}" text-anchor="middle" fill="#fff">${esc(symText)}</text>` : ""}
   ${d.multiplier ? `<text x="842" y="749" font-size="${multSize}" fill="#fff">${esc(d.multiplier)}</text>` : ""}
   ${d.pnl ? `<text x="883" y="822" font-size="63" fill="${color}">P&amp;L ${esc(d.pnl)}</text>` : ""}
+  ${d.example ? `<text x="1880" y="1045" font-size="40" text-anchor="end" fill="#9a9a9a">EXAMPLE</text>` : ""}
 </svg>`;
 }
