@@ -6,6 +6,8 @@ export interface CardData {
   profit: boolean;
   coinImage?: string; // data URI
   character?: string; // data URI
+  background?: string; // data URI; omitted = plain grey
+  username?: string; // Telegram username, shown bottom-right
   example?: boolean; // adds a permanent EXAMPLE tag (used by /larp)
 }
 
@@ -27,12 +29,14 @@ export function buildCardSvg(d: CardData): string {
   const color = d.profit ? "#19ff4d" : "#ff3b3b";
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="1080" viewBox="0 0 1920 1080" font-family="${FONT}">
   <rect width="1920" height="1080" fill="#121212"/>
+  ${d.background ? `<image href="${d.background}" x="0" y="0" width="1920" height="1080" preserveAspectRatio="xMidYMid slice"/><rect width="1920" height="1080" fill="#000" opacity="0.45"/>` : ""}
   ${character}
   <text x="60" y="112" font-size="76" fill="#fff">${esc(d.title)}</text>
   ${coin}
   ${d.symbol ? `<text x="384" y="1013" font-size="${symSize}" text-anchor="middle" fill="#fff">${esc(symText)}</text>` : ""}
   ${d.multiplier ? `<text x="842" y="749" font-size="${multSize}" fill="#fff">${esc(d.multiplier)}</text>` : ""}
   ${d.pnl ? `<text x="883" y="822" font-size="63" fill="${color}">P&amp;L ${esc(d.pnl)}</text>` : ""}
-  ${d.example ? `<text x="1880" y="1045" font-size="40" text-anchor="end" fill="#9a9a9a">EXAMPLE</text>` : ""}
+  ${d.username ? `<text x="1880" y="1000" font-size="44" text-anchor="end" fill="#d0d0d0">@${esc(d.username)}</text>` : ""}
+  ${d.example ? `<text x="1880" y="1052" font-size="34" text-anchor="end" fill="#9a9a9a">EXAMPLE</text>` : ""}
 </svg>`;
 }
