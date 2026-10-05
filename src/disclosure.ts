@@ -23,7 +23,7 @@ export function record(e: Omit<DisclosureEntry, "ts">): void {
 
 export function render(): string {
   let out =
-    "MATERBABE COIN KIRKINATOR — WALLET DISCLOSURE\n" +
+    "TOTAL — WALLET DISCLOSURE\n" +
     "The wallets below (treasury and Chusi wallets) are CONTROLLED BY THE OPERATOR of this bot.\n" +
     "They are not independent holders.\n" +
     `Master wallet: ${config.master.publicKey.toBase58()}\n\n`;
