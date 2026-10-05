@@ -71,6 +71,12 @@ export const config = {
   slippagePercent,
   slippageBps: Math.round(slippagePercent * 100),
   dataDir,
+  githubToken: process.env.GITHUB_TOKEN?.trim() || "",
+  githubRepo: process.env.GITHUB_REPO?.trim() || "", // "owner/name"
+  githubBranch: process.env.GITHUB_BRANCH?.trim() || "main",
+  githubBuyersPath: process.env.GITHUB_BUYERS_PATH?.trim() || "buyers.txt",
+  accessPriceUsd: positive("ACCESS_PRICE_USD", "50"),
+  cardLink: process.env.CARD_LINK?.trim() || "t.me/TotalLiqBot",
   cardTitle: process.env.CARD_TITLE?.trim() || "MaterBabe GavinEggz",
   storeKey, // also the seed that derives every wallet key: back it up!
   publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").trim().replace(/\/$/, ""),
