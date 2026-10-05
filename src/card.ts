@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { Resvg } from "@resvg/resvg-js";
 import { PublicKey } from "@solana/web3.js";
 import * as sol from "./solana.js";
@@ -9,7 +10,6 @@ import { FRAME_WEBP_BASE64 } from "./frameData.js";
 
 const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf";
 const fontPath = (): string => path.join(config.dataDir, "fonts", "Poppins-Bold.ttf");
-const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 
 async function ensureFont(): Promise<boolean> {
   const f = fontPath();
@@ -25,9 +25,42 @@ async function ensureFont(): Promise<boolean> {
   }
 }
 
-const dataUri = (buf: Buffer, ext: string): string => `data:${MIME[ext] ?? "image/png"};base64,${buf.toString("base64")}`;
+/** The SVG renderer only reads a few formats, so every picture is converted to PNG first (handles WebP, AVIF, GIF, JPEG...). */
+async function toPngDataUri(buf: Buffer, maxWidth: number): Promise<string | undefined> {
+  try {
+    const out = await sharp(buf).resize({ width: maxWidth, withoutEnlargement: true }).png().toBuffer();
+    return `data:image/png;base64,${out.toString("base64")}`;
+  } catch (e) {
+    console.error("Image convert failed:", e instanceof Error ? e.message : "unknown");
+    return undefined;
+  }
+}
 
-/** Saves the cut-out artwork shown faintly on the right of the card. */
+let frameUri: string | undefined;
+async function getFrame(): Promise<string> {
+  frameUri ??= await toPngDataUri(Buffer.from(FRAME_WEBP_BASE64, "base64"), 1000);
+  return frameUri ?? `data:image/webp;base64,${FRAME_WEBP_BASE64}`;
+}
+
+// ---- IPFS gateways: metadata and pictures often sit behind a slow or blocked gateway ----
+const GATEWAYS = ["https://ipfs.io/ipfs/", "https://cloudflare-ipfs.com/ipfs/", "https://dweb.link/ipfs/", "https://gateway.pinata.cloud/ipfs/"];
+const toHttp = (u: string): string => (u.startsWith("ipfs://") ? `https://ipfs.io/ipfs/${u.slice(7).replace(/^ipfs\//, "")}` : u);
+function variants(url: string): string[] {
+  const m = /\/ipfs\/(.+)$/.exec(url);
+  return m ? [url, ...GATEWAYS.map((g) => g + m[1])] : [url];
+}
+async function fetchAny(url: string, ms = 7000): Promise<Response | null> {
+  for (const u of variants(toHttp(url))) {
+    try {
+      const r = await fetch(u, { signal: AbortSignal.timeout(ms) });
+      if (r.ok) return r;
+    } catch {
+      /* try the next gateway */
+    }
+  }
+  return null;
+}
+
 export function setCharacter(buf: Buffer, ext: "png" | "jpg"): void {
   fs.mkdirSync(config.dataDir, { recursive: true });
   for (const e of ["png", "jpg"]) fs.rmSync(path.join(config.dataDir, `character.${e}`), { force: true });
@@ -41,17 +74,10 @@ export function setBackground(buf: Buffer, ext: "png" | "jpg"): void {
 export function clearBackground(): void {
   for (const e of ["png", "jpg"]) fs.rmSync(path.join(config.dataDir, `background.${e}`), { force: true });
 }
-function loadBackground(): string | undefined {
+async function loadLocal(name: string, maxWidth: number): Promise<string | undefined> {
   for (const e of ["png", "jpg"]) {
-    const f = path.join(config.dataDir, `background.${e}`);
-    if (fs.existsSync(f)) return dataUri(fs.readFileSync(f), e);
-  }
-  return undefined;
-}
-function loadCharacter(): string | undefined {
-  for (const e of ["png", "jpg"]) {
-    const f = path.join(config.dataDir, `character.${e}`);
-    if (fs.existsSync(f)) return dataUri(fs.readFileSync(f), e);
+    const f = path.join(config.dataDir, `${name}.${e}`);
+    if (fs.existsSync(f)) return toPngDataUri(fs.readFileSync(f), maxWidth);
   }
   return undefined;
 }
@@ -59,17 +85,16 @@ function loadCharacter(): string | undefined {
 async function loadCoinImage(image?: string): Promise<string | undefined> {
   if (!image) return undefined;
   try {
-    if (/^https:\/\//i.test(image)) {
-      const r = await fetch(image, { signal: AbortSignal.timeout(8_000) });
-      if (!r.ok) return undefined;
-      const buf = Buffer.from(await r.arrayBuffer());
-      const mime =
-        buf[0] === 0x89 ? "image/png" : buf[0] === 0xff ? "image/jpeg" : buf[0] === 0x47 ? "image/gif" : buf[0] === 0x52 ? "image/webp" : "image/png";
-      return `data:${mime};base64,${buf.toString("base64")}`;
+    if (/^(https:\/\/|ipfs:\/\/)/i.test(image)) {
+      const r = await fetchAny(image);
+      if (!r) {
+        console.error("Coin image could not be downloaded from any gateway");
+        return undefined;
+      }
+      return toPngDataUri(Buffer.from(await r.arrayBuffer()), 800);
     }
     const f = path.join(config.dataDir, image);
-    if (!fs.existsSync(f)) return undefined;
-    return dataUri(fs.readFileSync(f), path.extname(f).slice(1).toLowerCase());
+    return fs.existsSync(f) ? toPngDataUri(fs.readFileSync(f), 800) : undefined;
   } catch {
     return undefined;
   }
@@ -88,15 +113,15 @@ export async function renderCard(p: {
   const svg = buildCardSvg({
     title: config.cardTitle,
     tag: p.example ? "EXAMPLE" : config.cardLink,
-    frame: `data:image/webp;base64,${FRAME_WEBP_BASE64}`,
+    frame: await getFrame(),
     symbol: p.symbol,
     multiplier: p.multiplier,
     pnl: p.pnl,
     profit: p.profit,
     username: p.username,
     coinImage: await loadCoinImage(p.image),
-    character: loadCharacter(),
-    background: loadBackground(),
+    character: await loadLocal("character", 1000),
+    background: await loadLocal("background", 1672),
   });
   const resvg = new Resvg(svg, {
     fitTo: { mode: "width", value: 1672 },
@@ -107,15 +132,14 @@ export async function renderCard(p: {
   return resvg.render().asPng();
 }
 
+// ---- coin lookup: on-chain metadata first, DexScreener only as a fallback ----
 const METADATA_PROGRAM = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
-const gateway = (u: string): string => (u.startsWith("ipfs://") ? `https://ipfs.io/ipfs/${u.slice(7).replace(/^ipfs\//, "")}` : u);
 
 function readStr(buf: Buffer, off: number): [string, number] {
   const len = buf.readUInt32LE(off);
   return [buf.subarray(off + 4, off + 4 + len).toString("utf8").replace(/\0+$/g, "").trim(), off + 4 + len];
 }
 
-/** Name/symbol/uri from the mint itself (Token-2022 metadata) or the Metaplex metadata account. */
 async function onChainMeta(mint: PublicKey): Promise<{ name?: string; symbol?: string; uri?: string }> {
   const parsed = await sol.withRetry(() => sol.connection.getParsedAccountInfo(mint));
   const data = parsed.value?.data as unknown as
@@ -139,7 +163,6 @@ async function onChainMeta(mint: PublicKey): Promise<{ name?: string; symbol?: s
   return { name, symbol, uri };
 }
 
-/** Ticker and picture for any coin: on-chain metadata first, DexScreener only as a fallback. */
 export async function lookupCoin(mint: string): Promise<{ symbol?: string; image?: string }> {
   let symbol: string | undefined;
   let image: string | undefined;
@@ -147,14 +170,16 @@ export async function lookupCoin(mint: string): Promise<{ symbol?: string; image
     const m = await onChainMeta(new PublicKey(mint));
     symbol = m.symbol || undefined;
     if (m.uri) {
-      try {
-        const r = await fetch(gateway(m.uri), { signal: AbortSignal.timeout(8_000) });
-        if (r.ok) {
+      const r = await fetchAny(m.uri);
+      if (r) {
+        try {
           const j = (await r.json()) as { image?: string };
-          if (j.image) image = gateway(j.image);
+          if (j.image) image = toHttp(j.image);
+        } catch {
+          /* metadata was not JSON */
         }
-      } catch {
-        /* metadata host unreachable */
+      } else {
+        console.error("Coin metadata could not be downloaded from any gateway");
       }
     }
   } catch {
