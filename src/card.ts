@@ -9,20 +9,42 @@ import { buildCardSvg } from "./cardsvg.js";
 import { FRAME_WEBP_BASE64 } from "./frameData.js";
 
 const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf";
-const fontPath = (): string => path.join(config.dataDir, "fonts", "Poppins-Bold.ttf");
 
-async function ensureFont(): Promise<boolean> {
-  const f = fontPath();
-  if (fs.existsSync(f)) return true;
+async function download(file: string, url: string, ms: number): Promise<string | null> {
+  const f = path.join(config.dataDir, "fonts", file);
+  if (fs.existsSync(f)) return f;
   try {
-    const r = await fetch(FONT_URL, { signal: AbortSignal.timeout(15_000) });
-    if (!r.ok) return false;
+    const r = await fetch(url, { signal: AbortSignal.timeout(ms) });
+    if (!r.ok) return null;
     fs.mkdirSync(path.dirname(f), { recursive: true });
     fs.writeFileSync(f, Buffer.from(await r.arrayBuffer()));
-    return true;
+    return f;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export type Lang = "en" | "es" | "ru" | "zh" | "ar";
+const NOTO = "https://github.com/google/fonts/raw/main/ofl";
+export const LANGS: Record<Lang, { name: string; pnl: string; initial: string; font?: { file: string; url: string } }> = {
+  en: { name: "English", pnl: "P&L", initial: "Initial Buy" },
+  es: { name: "Español", pnl: "P&G", initial: "Compra inicial" },
+  ru: { name: "Русский", pnl: "П/У", initial: "Начальная покупка", font: { file: "NotoSans.ttf", url: `${NOTO}/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf` } },
+  zh: { name: "中文", pnl: "盈亏", initial: "初始买入", font: { file: "NotoSansSC.ttf", url: `${NOTO}/notosanssc/NotoSansSC%5Bwght%5D.ttf` } },
+  ar: { name: "العربية", pnl: "الربح/الخسارة", initial: "الشراء الأولي", font: { file: "NotoSansArabic.ttf", url: `${NOTO}/notosansarabic/NotoSansArabic%5Bwdth%2Cwght%5D.ttf` } },
+};
+const settingsFile = (): string => path.join(config.dataDir, "settings.json");
+export function getLang(): Lang {
+  try {
+    const l = (JSON.parse(fs.readFileSync(settingsFile(), "utf8")) as { lang?: string }).lang;
+    return l && l in LANGS ? (l as Lang) : "en";
+  } catch {
+    return "en";
+  }
+}
+export function setLang(l: Lang): void {
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.writeFileSync(settingsFile(), JSON.stringify({ lang: l }));
 }
 
 /** The SVG renderer only reads a few formats, so every picture is converted to PNG first (handles WebP, AVIF, GIF, JPEG...). */
@@ -106,18 +128,32 @@ export async function renderCard(p: {
   multiplier: string;
   pnl: string;
   profit: boolean;
+  profitSol?: string;
+  initialBuy?: string;
   example?: boolean;
   username?: string;
 }): Promise<Buffer> {
-  const hasFont = await ensureFont();
+  const L = LANGS[getLang()];
+  let labels = { pnl: L.pnl, initial: L.initial };
+  const fontFiles: string[] = [];
+  const base = await download("Poppins-Bold.ttf", FONT_URL, 15_000);
+  if (base) fontFiles.push(base);
+  if (L.font) {
+    const extra = await download(L.font.file, L.font.url, 90_000);
+    if (extra) fontFiles.push(extra);
+    else labels = { pnl: LANGS.en.pnl, initial: LANGS.en.initial }; // font unavailable: fall back to English labels
+  }
   const svg = buildCardSvg({
     title: config.cardTitle,
     tag: p.example ? "EXAMPLE" : config.cardLink,
     frame: await getFrame(),
+    labels,
     symbol: p.symbol,
     multiplier: p.multiplier,
     pnl: p.pnl,
     profit: p.profit,
+    profitSol: p.profitSol,
+    initialBuy: p.initialBuy,
     username: p.username,
     coinImage: await loadCoinImage(p.image),
     character: await loadLocal("character", 1000),
@@ -125,8 +161,8 @@ export async function renderCard(p: {
   });
   const resvg = new Resvg(svg, {
     fitTo: { mode: "width", value: 1672 },
-    font: hasFont
-      ? { fontFiles: [fontPath()], loadSystemFonts: false, defaultFontFamily: "Poppins" }
+    font: fontFiles.length
+      ? { fontFiles, loadSystemFonts: false, defaultFontFamily: "Poppins" }
       : { loadSystemFonts: true },
   });
   return resvg.render().asPng();
