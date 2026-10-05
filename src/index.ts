@@ -11,14 +11,67 @@ import * as tokens from "./tokens.js";
 import * as disclosure from "./disclosure.js";
 import * as meta from "./metadata.js";
 import * as card from "./card.js";
+import * as access from "./access.js";
 import { startServer } from "./server.js";
 
 const bot = new Telegraf(config.telegramToken, { handlerTimeout: 900_000 });
+const LOCK = "🔐 Total - Create Solana Based MemeCoins\nAccess required.\nUse:\n/access <key>";
+const lockKb = () => Markup.inlineKeyboard([[Markup.button.callback(`💳 Buy access ($${config.accessPriceUsd})`, "buy:access")]]);
+async function buyAccess(ctx: Context): Promise<void> {
+  const uid = ctx.from!.id;
+  if (uid === config.ownerTelegramId || access.isAccepted(uid)) return void (await ctx.reply("You already have access."));
+  const price = await sol.getSolPriceUsd();
+  if (!price) return void (await ctx.reply("Price feed unavailable. Try again in a minute."));
+  const q = access.createQuote(uid, price);
+  await ctx.reply(
+    `💳 Buy access — $${q.usd}\n\nSend exactly this much SOL:\n<code>${sol.formatSol(q.lamports, 6)}</code>\n\nTo this address:\n<code>${q.address}</code>\n\nValid for 60 minutes (1 SOL = $${price.toFixed(2)}). Your access code arrives here automatically once the payment lands, usually within a minute.`,
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "🔄 Check payment", callback_data: "pay:check" }]] } },
+  );
+}
+async function checkPayment(ctx: Context): Promise<void> {
+  const r = await access.processUser(ctx.from!.id);
+  if (r.state === "paid") return void (await ctx.reply(access.codeMessage(r.code), { parse_mode: "HTML" }));
+  if (r.state === "short") return void (await ctx.reply(`Received ${sol.formatSol(r.received, 6)} SOL, ${sol.formatSol(r.needed - r.received, 6)} SOL more needed.`));
+  if (r.state === "waiting") return void (await ctx.reply("No payment seen yet. It can take a minute after you send."));
+  await ctx.reply("No active purchase. Tap Buy access to start one.", lockKb());
+}
+const attempts = new Map<number, { n: number; until: number }>();
+async function handleAccess(ctx: Context, text: string): Promise<void> {
+  const id = ctx.from!.id;
+  try {
+    await ctx.deleteMessage(); // remove the key from chat history
+  } catch {
+    /* ignore */
+  }
+  const a = attempts.get(id) ?? { n: 0, until: 0 };
+  if (a.until > Date.now()) return void (await ctx.reply("⏳ Too many wrong keys. Try again later."));
+  const r = access.redeem(id, text.split(/\s+/).slice(1).join(" "));
+  if (r === "ok") {
+    attempts.delete(id);
+    await ctx.reply("✅ Access granted.");
+    return showMenu(ctx);
+  }
+  a.n++;
+  if (a.n >= 5) {
+    a.n = 0;
+    a.until = Date.now() + 60 * 60_000;
+  }
+  attempts.set(id, a);
+  await ctx.reply(r === "used" ? "❌ That key was already used." : "❌ Invalid key.");
+}
+// The owner and accepted members get through. Everyone else can only use /start and /access.
 bot.use(async (ctx, next) => {
-  if (ctx.from?.id !== config.ownerTelegramId) return; // ignore everyone except the owner
-  return next();
+  const id = ctx.from?.id;
+  if (!id) return;
+  if (id === config.ownerTelegramId || access.isAccepted(id)) return next();
+  const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+  if (/^\/access(@\w+)?(\s|$)/i.test(text)) return handleAccess(ctx, text);
+  const cbData = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data ?? "" : "";
+  if (/^(buy|pay):/.test(cbData) || /^\/buy(@\w+)?(\s|$)/i.test(text)) return next();
+  if (/^\/start/i.test(text)) await ctx.reply(LOCK, lockKb());
 });
 
+const BOT_NAME = "Total - Create Solana Based MemeCoins";
 const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
 const TOP_HOLDER_WALLETS = 10;
 const ALLOC_ATA_RENT = 2_500_000n; // per-wallet token account rent estimate
@@ -75,12 +128,13 @@ const confirms = new Map<string, Confirm>();
 // ---------- helpers ----------
 // Only the owner's numeric Telegram ID can use the bot. Everyone else is silently ignored.
 async function gate(ctx: Context): Promise<boolean> {
-  return ctx.from?.id === config.ownerTelegramId;
+  const id = ctx.from?.id;
+  return Boolean(id) && (id === config.ownerTelegramId || access.isAccepted(id!));
 }
 async function owner(ctx: Context): Promise<boolean> {
   if (!(await gate(ctx))) return false;
   if (ctx.from?.id !== config.ownerTelegramId) {
-    await ctx.reply("⛔ Owner only.");
+    await ctx.reply("⛔ Not available on your account yet.");
     return false;
   }
   return true;
@@ -141,7 +195,7 @@ const menuKb = () =>
 
 async function showMenu(ctx: Context): Promise<void> {
   if (!(await gate(ctx))) return;
-  await ctx.reply("🪙 MaterBabe Coin Kirkinator\nCreated by: YYLuccys Mom\nMainnet: ONLINE", menuKb());
+  await ctx.reply("🪙 Total - Create Solana Based MemeCoins\nMainnet: ONLINE", menuKb());
 }
 
 async function sendCa(ctx: Context, mint: string): Promise<void> {
@@ -237,7 +291,7 @@ async function showAdmin(ctx: Context): Promise<void> {
 }
 
 async function showStatus(ctx: Context): Promise<void> {
-  if (!(await gate(ctx))) return;
+  if (!(await owner(ctx))) return;
   const bal = await sol.getSolBalance(config.master.publicKey);
   await ctx.reply(
     `Network: Solana Mainnet\nRPC: ${config.rpcLabel}\nMaster: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nTreasury wallets: ${store.getWallets("treasury").length}\nChusi wallets: ${store.getWallets("chusi").length}\nSaved coins: ${store.getCoins().length}\nSlippage: ${config.slippagePercent}%\nData dir: ${config.dataDir}\nPublic URL: ${config.publicUrl || "NOT SET"}`,
@@ -264,7 +318,21 @@ async function clearChat(ctx: Context, lastId: number): Promise<void> {
 }
 
 // ---------- analytics ----------
+async function runPublicAnalytics(ctx: Context, text: string): Promise<void> {
+  const mint = sol.parsePublicKey(text);
+  const sup = await sol.withRetry(() => sol.connection.getTokenSupply(mint));
+  let curve = "Bonding curve data: unavailable";
+  try {
+    const c = await pump.getCurveState(mint);
+    curve = `Price: ${c.priceText}\nMarket cap: ${c.marketCapText}\nGraduated: ${c.graduated ? "YES" : "NO"}`;
+  } catch {
+    /* not a bonding-curve coin */
+  }
+  await ctx.reply(`📊 TOKEN ANALYTICS\nMint:\n${mint.toBase58()}\n\n${curve}\n\nTotal supply: ${sol.formatUnits(BigInt(sup.value.amount), sup.value.decimals)}`);
+}
+
 async function runAnalytics(ctx: Context, text: string): Promise<void> {
+  if (ctx.from?.id !== config.ownerTelegramId) return runPublicAnalytics(ctx, text);
   const mint = sol.parsePublicKey(text);
   const sup = await sol.withRetry(() => sol.connection.getTokenSupply(mint));
   const decimals = sup.value.decimals;
@@ -1066,10 +1134,23 @@ async function doExport(ctx: Context): Promise<void> {
 
 // ---------- commands ----------
 bot.start(showMenu);
+bot.command("buy", buyAccess);
+bot.action("buy:access", async (ctx) => {
+  await ctx.answerCbQuery();
+  await safe(ctx, () => buyAccess(ctx));
+});
+bot.action("pay:check", async (ctx) => {
+  await ctx.answerCbQuery();
+  await safe(ctx, () => checkPayment(ctx));
+});
+bot.command("sales", async (ctx) => {
+  if (!(await owner(ctx))) return;
+  await ctx.reply(access.salesSummary());
+});
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /larp /cardbg /cardimage /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /sales /larp /cardbg /cardimage /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -1321,7 +1402,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     flows.delete(uid);
     return runAnalytics(ctx, text);
   }
-  if (uid !== config.ownerTelegramId) return void (await ctx.reply("⛔ Owner only."));
+  if (uid !== config.ownerTelegramId) return void (await ctx.reply("⛔ Not available on your account yet."));
 
   const wantsMint =
     (f.kind === "trade" && f.step === "mint") ||
@@ -1547,6 +1628,7 @@ async function main(): Promise<void> {
   console.log("Loading configuration...");
   console.log("Loading wallet registry...");
   store.loadStore();
+  access.loadAccess();
   console.log("Connecting to Solana...");
   console.log("Checking network...");
   await sol.verifyMainnet();
@@ -1554,13 +1636,28 @@ async function main(): Promise<void> {
   const bal = await sol.getSolBalance(config.master.publicKey);
   console.log("Starting Telegram bot...");
   await bot.telegram.getMe();
+  await fetch(`https://api.telegram.org/bot${config.telegramToken}/getMyName`)
+    .then((r) => r.json() as Promise<{ result?: { name?: string } }>)
+    .then(async (j) => {
+      if (j.result?.name !== BOT_NAME) {
+        await fetch(`https://api.telegram.org/bot${config.telegramToken}/setMyName`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: BOT_NAME }),
+        });
+      }
+    })
+    .catch(() => undefined);
   startServer(config.port, disclosure.render);
+  access.startWatcher(async (id, html) => {
+    await bot.telegram.sendMessage(id, html, { parse_mode: "HTML" }).catch(() => undefined);
+  });
   bot.launch().catch((e) => {
     console.error("Telegram launch failed:", e instanceof Error ? e.message : "unknown");
     process.exit(1);
   });
   console.log(
-    `🟢 MaterBabe Coin Kirkinator online\nNetwork: Solana Mainnet\nRPC: connected (${config.rpcLabel})\nMaster wallet: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nData dir: ${config.dataDir}`,
+    `🟢 Total - Create Solana Based MemeCoins online\nNetwork: Solana Mainnet\nRPC: connected (${config.rpcLabel})\nMaster wallet: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nData dir: ${config.dataDir}`,
   );
 }
 
