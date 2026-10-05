@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "MaterBabe Coin Kirkinator — created by YYLuccys Mom",
+  "description": "Total - Create Solana Based MemeCoins",
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
