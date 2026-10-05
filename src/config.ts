@@ -75,6 +75,7 @@ export const config = {
   githubRepo: process.env.GITHUB_REPO?.trim() || "", // "owner/name"
   githubBranch: process.env.GITHUB_BRANCH?.trim() || "main",
   githubBuyersPath: process.env.GITHUB_BUYERS_PATH?.trim() || "buyers.txt",
+  disclosureUrl: process.env.DISCLOSURE_URL?.trim() || "", // e.g. your website page; default is this bot's /disclosure
   accessPriceUsd: positive("ACCESS_PRICE_USD", "50"),
   cardLink: process.env.CARD_LINK?.trim() || "t.me/TotalLiqBot",
   cardTitle: process.env.CARD_TITLE?.trim() || "MaterBabe GavinEggz",
