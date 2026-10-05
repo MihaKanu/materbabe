@@ -71,6 +71,7 @@ bot.use(async (ctx, next) => {
   if (/^\/start/i.test(text)) await ctx.reply(LOCK, lockKb());
 });
 
+const DISCLOSURE_URL = (): string => config.disclosureUrl || `${config.publicUrl}/disclosure`;
 const BOT_NAME = "Total - Create Solana Based MemeCoins";
 const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
 const TOP_HOLDER_WALLETS = 10;
@@ -116,7 +117,7 @@ type Flow =
   | { kind: "export" }
   | { kind: "cardimg" }
   | { kind: "cardbg" }
-  | { kind: "larp"; step: "coin" | "mult" | "pnl" | "bg"; mint?: PublicKey; mult?: string; pnl?: string; profit?: boolean }
+  | { kind: "larp"; step: "coin" | "mult" | "pnl" | "bg"; mint?: PublicKey; mult?: string; pnl?: string; pnlUsd?: number; profit?: boolean }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -190,7 +191,7 @@ const menuKb = () =>
     [Markup.button.callback("📤 Send SOL Out", "m:send"), Markup.button.callback("⚙️ Admin", "m:admin")],
     [Markup.button.callback("📈 Live Panel", "m:panel"), Markup.button.callback("🔐 Export Wallets", "m:export")],
     [Markup.button.callback("🖼 Card Background", "m:cardbg"), Markup.button.callback("🎭 Example Card", "m:larp")],
-    [Markup.button.callback("🧹 Clear Chat", "m:clear"), Markup.button.callback("📄 Disclosure", "m:disclosure")],
+    [Markup.button.callback("🧹 Clear Chat", "m:clear"), Markup.button.callback("🌐 Language", "m:language")],
   ]);
 
 async function showMenu(ctx: Context): Promise<void> {
@@ -301,7 +302,7 @@ async function showStatus(ctx: Context): Promise<void> {
 async function sendDisclosure(ctx: Context): Promise<void> {
   if (!(await owner(ctx))) return;
   await ctx.replyWithDocument({ source: Buffer.from(disclosure.render()), filename: "disclosure.txt" });
-  if (config.publicUrl) await ctx.reply(`Public link:\n${config.publicUrl}/disclosure`);
+  if (config.publicUrl) await ctx.reply(`Public link:\n${DISCLOSURE_URL()}`);
 }
 
 async function clearChat(ctx: Context, lastId: number): Promise<void> {
@@ -593,6 +594,8 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
           let multiplier = "";
           let pnl = "";
           let profit = true;
+          let profitSol: string | undefined;
+          let initialBuy: string | undefined;
           const pos = store.getPosition(mint.toBase58());
           if (pos && BigInt(pos.spent) > 0n) {
             const spent = BigInt(pos.spent);
@@ -602,6 +605,8 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
             let mt = m >= 10 ? String(Math.round(m)) : m.toFixed(2);
             if (mt.includes(".")) mt = mt.replace(/0+$/, "").replace(/\.$/, "");
             multiplier = `${mt}x`;
+            profitSol = `${back >= spent ? "+" : "-"}${sol.formatSol(back >= spent ? back - spent : spent - back, 2)}`;
+            initialBuy = String(Number(sol.formatSol(spent, 2)));
             profit = back >= spent;
             const diff = profit ? back - spent : spent - back;
             const sign = profit ? "+" : "-";
@@ -613,7 +618,7 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
             }
           }
           const coin = await coinForCard(mint);
-          photo = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier, pnl, profit, username: ctx.from?.username });
+          photo = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier, pnl, profit, profitSol, initialBuy, username: ctx.from?.username });
         } catch (e) {
           console.error("Card render failed:", e instanceof Error ? e.message : "unknown");
         }
@@ -729,8 +734,8 @@ async function confirmCreate(
       : "";
   const disclosed = pct10 > 0 || chusiCount > 0;
   const uriLine = f.self
-    ? `Metadata: hosted by this bot${f.desc ? "\nDescription: " + f.desc.slice(0, 100) : ""}${f.twitter ? "\nX: " + f.twitter : ""}${f.website ? "\nWebsite: " + f.website : ""}${disclosed ? "\nDisclosure link: " + (f.disclosureLink ?? `${config.publicUrl}/disclosure`) : ""}`
-    : `URI: ${f.uri}${disclosed ? `\nAdd this disclosure link to your own metadata: ${config.publicUrl}/disclosure` : ""}`;
+    ? `Metadata: hosted by this bot${f.desc ? "\nDescription: " + f.desc.slice(0, 100) : ""}${f.twitter ? "\nX: " + f.twitter : ""}${f.website ? "\nWebsite: " + f.website : ""}${disclosed ? "\nDisclosure link: " + (f.disclosureLink ?? `${DISCLOSURE_URL()}`) : ""}`
+    : `URI: ${f.uri}${disclosed ? `\nAdd this disclosure link to your own metadata: ${DISCLOSURE_URL()}` : ""}`;
 
   await askConfirm(
     ctx,
@@ -827,7 +832,7 @@ function readableDisclosure(text: string): string {
 }
 function disclosureLine(f: CreateFlow): string {
   const t = f.disclosureLink;
-  if (!t) return `Dev-controlled wallets are disclosed: ${meta.baseUrl()}/disclosure`;
+  if (!t) return `Dev-controlled wallets are disclosed: ${DISCLOSURE_URL()}`;
   return /^https:\/\//i.test(t) ? `Dev-controlled wallets are disclosed: ${t}` : t;
 }
 function cleanUrl(text: string): string {
@@ -877,7 +882,7 @@ async function handleCreate(ctx: Context, uid: number, f: CreateFlow, text: stri
     case "website": {
       flows.set(uid, { ...f, step: "disclink", website: skip ? undefined : cleanUrl(text) });
       return void (await ctx.reply(
-        `Disclosure line for the description (used only if operator wallets are involved).\nSend DEFAULT for ${config.publicUrl}/disclosure, or type your own readable sentence (e.g. Dev wallets C1-C10 hold 12%), or paste an https link. Blank or invisible text is refused because it hides the disclosure:`,
+        `Disclosure line for the description (used only if operator wallets are involved).\nSend DEFAULT for ${DISCLOSURE_URL()}, or type your own readable sentence (e.g. Dev wallets C1-C10 hold 12%), or paste an https link. Blank or invisible text is refused because it hides the disclosure:`,
       ));
     }
     case "disclink": {
@@ -946,12 +951,65 @@ function signedUsd(l: bigint, price: number | null): string {
 }
 const symbolOf = (mint: PublicKey): string => store.getCoins().find((c) => c.mint === mint.toBase58())?.symbol ?? sol.short(mint);
 
+const pendingUploads = new Map<number, { fileId: string; ext: "png" | "jpg" }>();
+async function offerUpload(ctx: Context, fileId: string, ext: "png" | "jpg", note?: string): Promise<void> {
+  pendingUploads.set(ctx.from!.id, { fileId, ext });
+  await ctx.reply(
+    `📎 Got your file.${note ? "\n" + note : ""}\nUse it as:`,
+    Markup.inlineKeyboard([[Markup.button.callback("Card background", "up:bg"), Markup.button.callback("Cut-out picture", "up:char"), Markup.button.callback("Ignore", "up:no")]]),
+  );
+}
+bot.action(/^up:(bg|char|no)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const uid = ctx.from!.id;
+  const u = pendingUploads.get(uid);
+  pendingUploads.delete(uid);
+  await ctx.editMessageReplyMarkup(undefined).catch(() => undefined);
+  if (!u || ctx.match[1] === "no") return void (await ctx.reply("Skipped."));
+  await safe(ctx, () => saveCharacter(ctx, u.fileId, u.ext, ctx.match[1] === "bg" ? "background" : "character"));
+});
+bot.on("animation", async (ctx) => {
+  if (ctx.from.id !== config.ownerTelegramId || flows.get(ctx.from.id)) return;
+  const t = ctx.message.animation.thumbnail;
+  if (!t) return void (await ctx.reply("That GIF has no preview frame I can use."));
+  await offerUpload(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the GIF's first frame.");
+});
+bot.on("video", async (ctx) => {
+  if (ctx.from.id !== config.ownerTelegramId || flows.get(ctx.from.id)) return;
+  const t = ctx.message.video.thumbnail;
+  if (!t) return void (await ctx.reply("That video has no preview frame I can use."));
+  await offerUpload(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the video's preview frame.");
+});
+async function startLanguage(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  const btns = (Object.keys(card.LANGS) as card.Lang[]).map((k) => Markup.button.callback(card.LANGS[k].name, `lg:${k}`));
+  await ctx.reply(`Card language (now: ${card.LANGS[card.getLang()].name}):`, Markup.inlineKeyboard(pairs(btns)));
+}
+bot.action(/^lg:(en|es|ru|zh|ar)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const l = ctx.match[1] as card.Lang;
+  card.setLang(l);
+  await ctx.reply(`✅ Card language: ${card.LANGS[l].name}`);
+});
+
 async function renderLarp(ctx: Context, uid: number): Promise<void> {
   const f = flows.get(uid);
   if (f?.kind !== "larp" || f.step !== "bg" || !f.mint) return;
   flows.delete(uid);
   const coin = await coinForCard(f.mint);
-  const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl: f.pnl ?? "", profit: f.profit ?? true, example: true, username: ctx.from?.username });
+  const price = await solUsd();
+  const mNum = Number((f.mult ?? "").replace(/x$/i, ""));
+  let profitSol: string | undefined;
+  let initialBuy: string | undefined;
+  if (price && f.pnlUsd !== undefined) {
+    const ps = f.pnlUsd / price;
+    profitSol = `${ps >= 0 ? "+" : "-"}${Math.abs(ps).toFixed(2)}`;
+    const init = mNum !== 1 ? ps / (mNum - 1) : 0;
+    if (init > 0) initialBuy = String(Number(init.toFixed(2)));
+  }
+  const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl: f.pnl ?? "", profit: f.profit ?? true, profitSol, initialBuy, example: true, username: ctx.from?.username });
   await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." });
 }
 async function startLarp(ctx: Context): Promise<void> {
@@ -1150,7 +1208,7 @@ bot.command("sales", async (ctx) => {
 bot.help(async (ctx) => {
   if (!(await gate(ctx))) return;
   await ctx.reply(
-    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /disclosure /sales /larp /cardbg /cardimage /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
+    "/start /help /status /balance /wallets /wallet <id> /create /fund /buy /sell /sellall /burn /multi (Add Wallets) /send /token /analytics /payout /admin /language /sales /larp /cardbg /cardimage /clear /recover <count> /cancel\n\nMoney commands are owner-only and need confirmation.",
   );
 });
 bot.command("status", showStatus);
@@ -1174,7 +1232,7 @@ bot.command("multi", startMulti);
 bot.command("sellall", startSellAll);
 bot.command("burn", startBurn);
 bot.command("send", startSend);
-bot.command("disclosure", sendDisclosure);
+bot.command("language", startLanguage);
 bot.command("panel", startPanelCmd);
 bot.command("export", startExport);
 bot.command("larp", async (ctx) => {
@@ -1233,7 +1291,7 @@ const routes: Record<string, (ctx: Context) => Promise<void>> = {
   sellall: startSellAll,
   burn: startBurn,
   send: startSend,
-  disclosure: sendDisclosure,
+  language: startLanguage,
   panel: startPanelCmd,
   cardbg: startCardBg,
   larp: startLarp,
@@ -1364,7 +1422,17 @@ async function saveCharacter(ctx: Context, fileId: string, ext: "png" | "jpg", t
 bot.on("document", async (ctx) => {
   const uid = ctx.from.id;
   const k = flows.get(uid)?.kind;
-  if (uid !== config.ownerTelegramId || (k !== "cardimg" && k !== "cardbg")) return;
+  if (uid !== config.ownerTelegramId) return;
+  if (k !== "cardimg" && k !== "cardbg") {
+    const d0 = ctx.message.document;
+    const mime = d0.mime_type ?? "";
+    if (!k && /^(image|video)\//.test(mime)) {
+      const still = mime.startsWith("image/") && mime !== "image/gif";
+      const fid = still ? d0.file_id : d0.thumbnail?.file_id;
+      if (fid) await offerUpload(ctx, fid, mime === "image/png" ? "png" : "jpg", still ? undefined : "Cards are still pictures, so I'll use its first frame.");
+    }
+    return;
+  }
   flows.delete(uid);
   const d = ctx.message.document;
   await safe(ctx, () => saveCharacter(ctx, d.file_id, d.mime_type === "image/png" ? "png" : "jpg", k === "cardbg" ? "background" : "character"));
@@ -1382,7 +1450,11 @@ bot.on("photo", async (ctx) => {
     const ph = ctx.message.photo[ctx.message.photo.length - 1];
     return void (await safe(ctx, () => saveCharacter(ctx, ph.file_id, "jpg")));
   }
-  if (uid !== config.ownerTelegramId || f?.kind !== "create" || f.step !== "image") return;
+  if (uid !== config.ownerTelegramId) return;
+  if (f?.kind !== "create" || f.step !== "image") {
+    if (!f) await offerUpload(ctx, ctx.message.photo[ctx.message.photo.length - 1].file_id, "jpg");
+    return;
+  }
   const photo = ctx.message.photo[ctx.message.photo.length - 1];
   flows.set(uid, { ...f, step: "twitter", imageFileId: photo.file_id });
   await ctx.reply("Got the image. X (Twitter) link or @handle, or SKIP:");
@@ -1432,7 +1504,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     if (!Number.isFinite(v) || Math.abs(v) > 1e9) throw new Error("Enter a number like 15000 or -250");
     const abs = Math.abs(v);
     const pnl = `${v >= 0 ? "+" : "-"}$${abs >= 1000 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(2)}`;
-    flows.set(uid, { kind: "larp", step: "bg", mint: f.mint, mult: f.mult, pnl, profit: v >= 0 });
+    flows.set(uid, { kind: "larp", step: "bg", mint: f.mint, mult: f.mult, pnl, pnlUsd: v, profit: v >= 0 });
     return void (await ctx.reply(
       "Pick the card background:",
       Markup.inlineKeyboard([[Markup.button.callback("Grey", "lb:grey"), Markup.button.callback("Keep current", "lb:keep"), Markup.button.callback("Upload image", "lb:upload")]]),
@@ -1615,7 +1687,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
             break;
           }
         }
-        return `${err ? `⚠️ Stopped early: ${err}\n` : "✅ "}Chusi wallets added\n${lines.join("\n")}\n\nRecorded. Use /disclosure for the public file.`;
+        return `${err ? `⚠️ Stopped early: ${err}\n` : "✅ "}Chusi wallets added\n${lines.join("\n")}\n\nRecorded.`;
       },
     );
   }
