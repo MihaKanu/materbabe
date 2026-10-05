@@ -5,9 +5,10 @@ import { PublicKey } from "@solana/web3.js";
 import * as sol from "./solana.js";
 import { config } from "./config.js";
 import { buildCardSvg } from "./cardsvg.js";
+import { FRAME_WEBP_BASE64 } from "./frameData.js";
 
-const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Medium.ttf";
-const fontPath = (): string => path.join(config.dataDir, "fonts", "Poppins-Medium.ttf");
+const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf";
+const fontPath = (): string => path.join(config.dataDir, "fonts", "Poppins-Bold.ttf");
 const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 
 async function ensureFont(): Promise<boolean> {
@@ -86,18 +87,19 @@ export async function renderCard(p: {
   const hasFont = await ensureFont();
   const svg = buildCardSvg({
     title: config.cardTitle,
+    tag: p.example ? "EXAMPLE" : config.cardLink,
+    frame: `data:image/webp;base64,${FRAME_WEBP_BASE64}`,
     symbol: p.symbol,
     multiplier: p.multiplier,
     pnl: p.pnl,
     profit: p.profit,
-    example: p.example,
     username: p.username,
     coinImage: await loadCoinImage(p.image),
     character: loadCharacter(),
     background: loadBackground(),
   });
   const resvg = new Resvg(svg, {
-    fitTo: { mode: "width", value: 1920 },
+    fitTo: { mode: "width", value: 1672 },
     font: hasFont
       ? { fontFiles: [fontPath()], loadSystemFonts: false, defaultFontFamily: "Poppins" }
       : { loadSystemFonts: true },
