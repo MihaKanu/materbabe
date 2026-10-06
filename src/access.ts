@@ -24,7 +24,7 @@ interface Sale {
   sig: string;
   at: string;
 }
-interface Db {
+export interface Db {
   accepted: Record<string, { at: string; keyHash: string }>;
   used: string[];
   issued: string[]; // hashes of keys sold through the bot
@@ -33,6 +33,7 @@ interface Db {
 }
 const hashFile = path.join(process.cwd(), "keys", "keyhashes.txt");
 const dbFile = path.join(config.dataDir, "access.json");
+export type AccessDb = Db;
 let db: Db = { accepted: {}, used: [], issued: [], pending: {}, sales: [] };
 let issuedSet = new Set<string>();
 let valid = new Set<string>();
@@ -218,4 +219,33 @@ export function startWatcher(notify: (id: number, html: string) => Promise<void>
       }
     })();
   }, 20_000);
+}
+
+export function exportState(): Db {
+  return JSON.parse(JSON.stringify(db)) as Db;
+}
+export function importState(d: Db): void {
+  db = d;
+  db.issued ??= [];
+  db.pending ??= {};
+  db.sales ??= [];
+  usedSet = new Set(db.used);
+  issuedSet = new Set(db.issued);
+  save();
+}
+
+export function exportDb(): Db {
+  return db;
+}
+/** Merge: never un-use a key and never drop a member. */
+export function importDb(s: Partial<Db>): void {
+  for (const [k, v] of Object.entries(s.accepted ?? {})) db.accepted[k] ??= v;
+  for (const h of s.used ?? []) usedSet.add(h);
+  for (const h of s.issued ?? []) issuedSet.add(h);
+  db.used = [...usedSet];
+  db.issued = [...issuedSet];
+  for (const [k, v] of Object.entries(s.pending ?? {})) db.pending[k] ??= v;
+  const sigs = new Set(db.sales.map((x) => x.sig));
+  for (const x of s.sales ?? []) if (!sigs.has(x.sig)) db.sales.push(x);
+  save();
 }
