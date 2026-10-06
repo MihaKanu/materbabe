@@ -12,6 +12,7 @@ import * as disclosure from "./disclosure.js";
 import * as meta from "./metadata.js";
 import * as card from "./card.js";
 import * as access from "./access.js";
+import * as portfolio from "./portfolio.js";
 import { startServer } from "./server.js";
 
 const bot = new Telegraf(config.telegramToken, { handlerTimeout: 900_000 });
@@ -72,6 +73,7 @@ bot.use(async (ctx, next) => {
 });
 
 const DISCLOSURE_URL = (): string => config.disclosureUrl || `${config.publicUrl}/disclosure`;
+const BUILD = "2026-10-06-media-v6";
 const BOT_NAME = "Total - Create Solana Based MemeCoins";
 const MIN_PER_WALLET = 10_000_000n; // 0.01 SOL
 const TOP_HOLDER_WALLETS = 10;
@@ -116,8 +118,10 @@ type Flow =
   | { kind: "panel"; step: "coin" | "mint" }
   | { kind: "export" }
   | { kind: "cardimg" }
+  | { kind: "pfsave" }
+  | { kind: "pfload"; step: "file" | "pass"; fileId?: string }
   | { kind: "cardbg" }
-  | { kind: "larp"; step: "coin" | "mult" | "pnl" | "bg"; mint?: PublicKey; mult?: string; pnl?: string; pnlUsd?: number; profit?: boolean }
+  | { kind: "larp"; step: "coin" | "mult" | "pnl" | "psol" | "init" | "bg"; mint?: PublicKey; mult?: string; pnl?: string; pnlUsd?: number; profit?: boolean; profitSol?: string; initialBuy?: string; awaitUpload?: boolean }
   | { kind: "multi"; step: "count" | "total"; count?: number }
   | { kind: "sellall"; step: "coin" | "mint" | "pct"; mint?: PublicKey }
   | { kind: "burn"; step: "coin" | "mint" | "scope" | "pct"; mint?: PublicKey; scope?: "master" | "all" }
@@ -190,6 +194,7 @@ const menuKb = () =>
     [Markup.button.callback("📊 Token Analytics", "m:analytics"), Markup.button.callback("📤 Payout", "m:payout")],
     [Markup.button.callback("📤 Send SOL Out", "m:send"), Markup.button.callback("⚙️ Admin", "m:admin")],
     [Markup.button.callback("📈 Live Panel", "m:panel"), Markup.button.callback("🔐 Export Wallets", "m:export")],
+    [Markup.button.callback("💾 Save Portfolio", "m:pfsave"), Markup.button.callback("📂 Upload Portfolio", "m:pfload")],
     [Markup.button.callback("🖼 Card Background", "m:cardbg"), Markup.button.callback("🎭 Example Card", "m:larp")],
     [Markup.button.callback("🧹 Clear Chat", "m:clear"), Markup.button.callback("🌐 Language", "m:language")],
   ]);
@@ -295,7 +300,7 @@ async function showStatus(ctx: Context): Promise<void> {
   if (!(await owner(ctx))) return;
   const bal = await sol.getSolBalance(config.master.publicKey);
   await ctx.reply(
-    `Network: Solana Mainnet\nRPC: ${config.rpcLabel}\nMaster: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nTreasury wallets: ${store.getWallets("treasury").length}\nChusi wallets: ${store.getWallets("chusi").length}\nSaved coins: ${store.getCoins().length}\nSlippage: ${config.slippagePercent}%\nData dir: ${config.dataDir}\nPublic URL: ${config.publicUrl || "NOT SET"}`,
+    `Build: ${BUILD}\nNetwork: Solana Mainnet\nRPC: ${config.rpcLabel}\nMaster: ${sol.short(config.master.publicKey)} (${sol.formatSol(bal)} SOL)\nTreasury wallets: ${store.getWallets("treasury").length}\nChusi wallets: ${store.getWallets("chusi").length}\nSaved coins: ${store.getCoins().length}\nSlippage: ${config.slippagePercent}%\nData dir: ${config.dataDir}\nPublic URL: ${config.publicUrl || "NOT SET"}`,
   );
 }
 
@@ -446,7 +451,7 @@ async function onMint(ctx: Context, uid: number, f: Flow, mint: PublicKey): Prom
       return void (await ctx.reply(GRAD_MSG));
     }
     flows.set(uid, { kind: "sellall", step: "pct", mint });
-    return void (await ctx.reply("Sell what share of every wallet's tokens?", pctKb()));
+    return void (await ctx.reply("Sell what share of every wallet's tokens? Tap a share, or type any percentage (e.g. 12.5):", pctKb()));
   }
   if (f.kind === "burn") {
     flows.set(uid, { kind: "burn", step: "scope", mint });
@@ -508,7 +513,7 @@ async function holdings(mint: PublicKey, pct: number, onlyMaster: boolean): Prom
     const chunk = sources.slice(i, i + 10);
     const bals = await Promise.all(chunk.map((s) => sol.getTokenBalance(new PublicKey(s.publicKey), mint)));
     chunk.forEach((s, j) => {
-      const raw = (bals[j].raw * BigInt(pct)) / 100n;
+      const raw = (bals[j].raw * BigInt(Math.round(pct * 100))) / 10000n; // pct may have 2 decimals
       if (raw > 0n) out.push({ id: s.id, raw, decimals: bals[j].decimals });
     });
   }
@@ -550,6 +555,15 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
   const decimals = rows[0].decimals;
   const total = rows.reduce((a, r) => a + r.raw, 0n);
   const q = await pump.quoteSell(mint, total, config.slippageBps);
+  let mcapLine = "";
+  try {
+    const m = await pump.marketCapAfterSell(mint, total);
+    const px = await solUsd();
+    const chg = m.before > 0n ? ((Number(m.after) - Number(m.before)) / Number(m.before)) * 100 : 0;
+    mcapLine = `\nMarket cap now: ${sol.formatSol(m.before, 2)} SOL (${usdFmt(m.before, px)})\nMarket cap after this sale: ~${sol.formatSol(m.after, 2)} SOL (${usdFmt(m.after, px)}), ${chg.toFixed(1)}%`;
+  } catch {
+    mcapLine = "\nMarket cap after this sale: unavailable";
+  }
   const fee = await sol.sellFeeEstimate(config.master);
   const needed = fee * BigInt(rows.filter((r) => r.id !== "M").length);
   const mbal = await sol.getSolBalance(config.master.publicKey);
@@ -560,7 +574,7 @@ async function planSellAll(ctx: Context, uid: number, mint: PublicKey, pct: numb
   const list = rows.map((r) => `${r.id}: ${sol.formatUnits(r.raw, decimals)}`);
   await askConfirm(
     ctx,
-    `Action: SELL ${pct}% FROM ALL WALLETS\nToken: ${mint.toBase58()}\nWallets: ${rows.length}\n${clip(list)}\n\nTotal: ${sol.formatUnits(total, decimals)}\nEstimated proceeds: ~${sol.formatSol(q.estLamports)} SOL (each sell is re-priced live; later sells get lower prices)\nNetwork fee: ~${sol.formatSol(fee, 6)} SOL per wallet, paid by master (live estimate)\nProceeds STAY in each wallet.\nSlippage: ${config.slippagePercent}%`,
+    `Action: SELL ${pct}% FROM ALL WALLETS\nToken: ${mint.toBase58()}\nWallets: ${rows.length}\n${clip(list)}\n\nTotal: ${sol.formatUnits(total, decimals)}${mcapLine}\nEstimated proceeds: ~${sol.formatSol(q.estLamports)} SOL (each sell is re-priced live; later sells get lower prices)\nNetwork fee: ~${sol.formatSol(fee, 6)} SOL per wallet, paid by master (live estimate)\nProceeds STAY in each wallet.\nSlippage: ${config.slippagePercent}%`,
     "sellall",
     async () => {
       const out: string[] = [];
@@ -951,6 +965,30 @@ function signedUsd(l: bigint, price: number | null): string {
 }
 const symbolOf = (mint: PublicKey): string => store.getCoins().find((c) => c.mint === mint.toBase58())?.symbol ?? sol.short(mint);
 
+const pendingRestore = new Map<number, portfolio.Portfolio>();
+async function startPfSave(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "pfsave" });
+  await ctx.reply("💾 Save Portfolio\nChoose a password (8+ characters). The file holds private keys, so it is encrypted with it, and you need the same password to upload it. Your message is deleted right after. (/cancel to abort)");
+}
+async function startPfLoad(ctx: Context): Promise<void> {
+  if (!(await owner(ctx))) return;
+  flows.set(ctx.from!.id, { kind: "pfload", step: "file" });
+  await ctx.reply("📂 Upload Portfolio\nSend your saved file now (as a file, up to 20 MB).");
+}
+bot.action(/^pf:(ok|no)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await owner(ctx))) return;
+  const uid = ctx.from!.id;
+  const p = pendingRestore.get(uid);
+  pendingRestore.delete(uid);
+  await ctx.editMessageReplyMarkup(undefined).catch(() => undefined);
+  if (!p || ctx.match[1] === "no") return void (await ctx.reply("Cancelled. Nothing changed."));
+  await safe(ctx, async () => {
+    portfolio.restore(p);
+    await ctx.reply("✅ Portfolio restored. Check /wallets and /balance.");
+  });
+});
 const pendingUploads = new Map<number, { fileId: string; ext: "png" | "jpg" }>();
 async function offerUpload(ctx: Context, fileId: string, ext: "png" | "jpg", note?: string): Promise<void> {
   pendingUploads.set(ctx.from!.id, { fileId, ext });
@@ -969,18 +1007,43 @@ bot.action(/^up:(bg|char|no)$/, async (ctx) => {
   if (!u || ctx.match[1] === "no") return void (await ctx.reply("Skipped."));
   await safe(ctx, () => saveCharacter(ctx, u.fileId, u.ext, ctx.match[1] === "bg" ? "background" : "character"));
 });
+/** Decides what an uploaded picture/GIF/video frame is for, based on what the owner is doing. */
+async function routeMedia(ctx: Context, fileId: string, ext: "png" | "jpg", note?: string): Promise<void> {
+  const uid = ctx.from!.id;
+  const f = flows.get(uid);
+  if (f?.kind === "cardbg") {
+    flows.delete(uid);
+    return saveCharacter(ctx, fileId, ext, "background");
+  }
+  if (f?.kind === "cardimg") {
+    flows.delete(uid);
+    return saveCharacter(ctx, fileId, ext, "character");
+  }
+  if (f?.kind === "create" && f.step === "image") {
+    flows.set(uid, { ...f, step: "twitter", imageFileId: fileId });
+    return void (await ctx.reply("Got the image (GIFs and videos use a still frame). X (Twitter) link or @handle, or SKIP:"));
+  }
+  if (f?.kind === "larp" && f.step === "bg") {
+    await saveCharacter(ctx, fileId, ext, "background");
+    return renderLarp(ctx, uid);
+  }
+  if (!f) return offerUpload(ctx, fileId, ext, note);
+  await ctx.reply("I'm in the middle of another step. Send /cancel first, then send the file.");
+}
 bot.on("animation", async (ctx) => {
-  if (ctx.from.id !== config.ownerTelegramId || flows.get(ctx.from.id)) return;
+  if (ctx.from.id !== config.ownerTelegramId) return;
   const t = ctx.message.animation.thumbnail;
   if (!t) return void (await ctx.reply("That GIF has no preview frame I can use."));
-  await offerUpload(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the GIF's first frame.");
+  await safe(ctx, () => routeMedia(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the GIF's first frame."));
 });
 bot.on("video", async (ctx) => {
-  if (ctx.from.id !== config.ownerTelegramId || flows.get(ctx.from.id)) return;
+  if (ctx.from.id !== config.ownerTelegramId) return;
   const t = ctx.message.video.thumbnail;
   if (!t) return void (await ctx.reply("That video has no preview frame I can use."));
-  await offerUpload(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the video's preview frame.");
+  await safe(ctx, () => routeMedia(ctx, t.file_id, "jpg", "Cards are still pictures, so I'll use the video's preview frame."));
 });
+const larpBgKb = () =>
+  Markup.inlineKeyboard([[Markup.button.callback("Grey", "lb:grey"), Markup.button.callback("Keep current", "lb:keep"), Markup.button.callback("Upload picture/GIF/video", "lb:upload")]]);
 async function startLanguage(ctx: Context): Promise<void> {
   if (!(await owner(ctx))) return;
   const btns = (Object.keys(card.LANGS) as card.Lang[]).map((k) => Markup.button.callback(card.LANGS[k].name, `lg:${k}`));
@@ -1001,13 +1064,13 @@ async function renderLarp(ctx: Context, uid: number): Promise<void> {
   const coin = await coinForCard(f.mint);
   const price = await solUsd();
   const mNum = Number((f.mult ?? "").replace(/x$/i, ""));
-  let profitSol: string | undefined;
-  let initialBuy: string | undefined;
+  let profitSol = f.profitSol;
+  let initialBuy = f.initialBuy;
   if (price && f.pnlUsd !== undefined) {
     const ps = f.pnlUsd / price;
-    profitSol = `${ps >= 0 ? "+" : "-"}${Math.abs(ps).toFixed(2)}`;
+    profitSol ??= `${ps >= 0 ? "+" : "-"}${Math.abs(ps).toFixed(2)}`;
     const init = mNum !== 1 ? ps / (mNum - 1) : 0;
-    if (init > 0) initialBuy = String(Number(init.toFixed(2)));
+    if (init > 0) initialBuy ??= String(Number(init.toFixed(2)));
   }
   const png = await card.renderCard({ symbol: coin.symbol, image: coin.image, multiplier: f.mult ?? "", pnl: f.pnl ?? "", profit: f.profit ?? true, profitSol, initialBuy, example: true, username: ctx.from?.username });
   await ctx.replyWithPhoto({ source: png }, { caption: "Example card. Not real results." });
@@ -1027,8 +1090,9 @@ bot.action(/^lb:(grey|keep|upload)$/, async (ctx) => {
   const uid = ctx.from!.id;
   const choice = ctx.match[1];
   if (choice === "upload") {
-    flows.set(uid, { kind: "cardbg" });
-    return void (await ctx.reply("Send your background image (file or photo), then run /larp again."));
+    const cur = flows.get(uid);
+    if (cur?.kind === "larp") flows.set(uid, { ...cur, awaitUpload: true });
+    return void (await ctx.reply("Send your picture, GIF or video now. I'll use it as the background and finish the card (GIFs and videos use a still frame)."));
   }
   if (choice === "grey") card.clearBackground();
   await safe(ctx, () => renderLarp(ctx, uid));
@@ -1233,6 +1297,9 @@ bot.command("sellall", startSellAll);
 bot.command("burn", startBurn);
 bot.command("send", startSend);
 bot.command("language", startLanguage);
+
+bot.command("saveportfolio", startPfSave);
+bot.command("uploadportfolio", startPfLoad);
 bot.command("panel", startPanelCmd);
 bot.command("export", startExport);
 bot.command("larp", async (ctx) => {
@@ -1292,6 +1359,8 @@ const routes: Record<string, (ctx: Context) => Promise<void>> = {
   burn: startBurn,
   send: startSend,
   language: startLanguage,
+  pfsave: startPfSave,
+  pfload: startPfLoad,
   panel: startPanelCmd,
   cardbg: startCardBg,
   larp: startLarp,
@@ -1423,13 +1492,18 @@ bot.on("document", async (ctx) => {
   const uid = ctx.from.id;
   const k = flows.get(uid)?.kind;
   if (uid !== config.ownerTelegramId) return;
+  const fl = flows.get(uid);
+  if (fl?.kind === "pfload" && fl.step === "file") {
+    flows.set(uid, { kind: "pfload", step: "pass", fileId: ctx.message.document.file_id });
+    return void (await ctx.reply("Enter the password you used when saving (your message is deleted right after):"));
+  }
   if (k !== "cardimg" && k !== "cardbg") {
     const d0 = ctx.message.document;
     const mime = d0.mime_type ?? "";
-    if (!k && /^(image|video)\//.test(mime)) {
+    if (/^(image|video)\//.test(mime)) {
       const still = mime.startsWith("image/") && mime !== "image/gif";
       const fid = still ? d0.file_id : d0.thumbnail?.file_id;
-      if (fid) await offerUpload(ctx, fid, mime === "image/png" ? "png" : "jpg", still ? undefined : "Cards are still pictures, so I'll use its first frame.");
+      if (fid) await safe(ctx, () => routeMedia(ctx, fid, mime === "image/png" ? "png" : "jpg", still ? undefined : "Cards are still pictures, so I'll use its first frame."));
     }
     return;
   }
@@ -1452,7 +1526,7 @@ bot.on("photo", async (ctx) => {
   }
   if (uid !== config.ownerTelegramId) return;
   if (f?.kind !== "create" || f.step !== "image") {
-    if (!f) await offerUpload(ctx, ctx.message.photo[ctx.message.photo.length - 1].file_id, "jpg");
+    await safe(ctx, () => routeMedia(ctx, ctx.message.photo[ctx.message.photo.length - 1].file_id, "jpg"));
     return;
   }
   const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -1487,7 +1561,7 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
 
   if ((f.kind === "sellall" || f.kind === "burn") && f.step === "pct") {
     const pct = Number(text);
-    if (!Number.isInteger(pct) || pct < 1 || pct > 100) throw new Error("Enter a whole number from 1 to 100");
+    if (!Number.isFinite(pct) || pct < 0.01 || pct > 100) throw new Error("Enter a percentage from 0.01 to 100, like 12.5");
     return onPercent(ctx, uid, f, pct);
   }
 
@@ -1504,11 +1578,54 @@ async function handleFlow(ctx: Context, uid: number, f: Flow, text: string): Pro
     if (!Number.isFinite(v) || Math.abs(v) > 1e9) throw new Error("Enter a number like 15000 or -250");
     const abs = Math.abs(v);
     const pnl = `${v >= 0 ? "+" : "-"}$${abs >= 1000 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(2)}`;
-    flows.set(uid, { kind: "larp", step: "bg", mint: f.mint, mult: f.mult, pnl, pnlUsd: v, profit: v >= 0 });
-    return void (await ctx.reply(
-      "Pick the card background:",
-      Markup.inlineKeyboard([[Markup.button.callback("Grey", "lb:grey"), Markup.button.callback("Keep current", "lb:keep"), Markup.button.callback("Upload image", "lb:upload")]]),
+    flows.set(uid, { kind: "larp", step: "psol", mint: f.mint, mult: f.mult, pnl, pnlUsd: v, profit: v >= 0 });
+    return void (await ctx.reply("Profit in SOL for the green bar (e.g. 134.03 or -3.5). Send SKIP to calculate it from the USD number:"));
+  }
+
+  if (f.kind === "pfsave") {
+    flows.delete(uid);
+    await ctx.deleteMessage().catch(() => undefined);
+    if (text.length < 8) throw new Error("Password must be at least 8 characters.");
+    const buf = portfolio.build(text);
+    const day = new Date().toISOString().slice(0, 10);
+    return void (await ctx.replyWithDocument(
+      { source: buf, filename: `total-portfolio-${day}.tpf` },
+      { caption: "💾 Your portfolio is in this file. Save it to your phone (Files app). It is encrypted: you need your password to upload it." },
     ));
+  }
+  if (f.kind === "pfload" && f.step === "pass" && f.fileId) {
+    flows.delete(uid);
+    await ctx.deleteMessage().catch(() => undefined);
+    const link = await ctx.telegram.getFileLink(f.fileId);
+    const res = await fetch(link.href);
+    if (!res.ok) throw new Error("Could not download the file");
+    const p = portfolio.open(Buffer.from(await res.arrayBuffer()), text);
+    pendingRestore.set(uid, p);
+    return void (await ctx.reply(
+      `${portfolio.summary(p)}\n\nRestoring replaces your current coins, wallet list, members and settings with this save.`,
+      Markup.inlineKeyboard([[Markup.button.callback("✅ Restore", "pf:ok"), Markup.button.callback("❌ Cancel", "pf:no")]]),
+    ));
+  }
+
+  if (f.kind === "larp" && f.step === "psol") {
+    let profitSol: string | undefined;
+    if (text.toUpperCase() !== "SKIP") {
+      const n = Number(text.replace(/[+,\s]/g, ""));
+      if (!Number.isFinite(n) || Math.abs(n) > 1e9) throw new Error("Enter a number like 134.03, or SKIP");
+      profitSol = `${n >= 0 ? "+" : "-"}${Math.abs(n).toFixed(2)}`;
+    }
+    flows.set(uid, { ...f, step: "init", profitSol });
+    return void (await ctx.reply("Initial buy in SOL (e.g. 2.3). Send SKIP to calculate it:"));
+  }
+  if (f.kind === "larp" && f.step === "init") {
+    let initialBuy: string | undefined;
+    if (text.toUpperCase() !== "SKIP") {
+      const n = Number(text.replace(/,/g, ""));
+      if (!Number.isFinite(n) || n <= 0 || n > 1e9) throw new Error("Enter a number like 2.3, or SKIP");
+      initialBuy = String(Number(n.toFixed(2)));
+    }
+    flows.set(uid, { ...f, step: "bg", initialBuy });
+    return void (await ctx.reply("Pick the card background:", larpBgKb()));
   }
 
   if (f.kind === "export") {
