@@ -5,7 +5,7 @@ import { Resvg } from "@resvg/resvg-js";
 import { PublicKey } from "@solana/web3.js";
 import * as sol from "./solana.js";
 import { config } from "./config.js";
-import { buildCardSvg } from "./cardsvg.js";
+import { buildCardSvg, bannerSize, esc, FONT } from "./cardsvg.js";
 import { FRAME_WEBP_BASE64 } from "./frameData.js";
 
 const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf";
@@ -122,6 +122,18 @@ async function loadCoinImage(image?: string): Promise<string | undefined> {
   }
 }
 
+type FontOpts = { fontFiles?: string[]; loadSystemFonts?: boolean; defaultFontFamily?: string };
+/** Exact rendered width of a text line, so icons can sit right next to it. */
+function measure(text: string, size: number, family: string, weight: number, font: FontOpts): number | undefined {
+  try {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="500"><text x="0" y="350" font-family="${family}" font-weight="${weight}" font-size="${size}">${esc(text)}</text></svg>`;
+    const b = new Resvg(svg, { font }).getBBox();
+    return b ? Math.round(b.width) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function renderCard(p: {
   symbol: string;
   image?: string;
@@ -138,12 +150,21 @@ export async function renderCard(p: {
   const fontFiles: string[] = [];
   const base = await download("Poppins-Bold.ttf", FONT_URL, 15_000);
   if (base) fontFiles.push(base);
+  const bebas = await download("BebasNeue-Regular.ttf", `${NOTO}/bebasneue/BebasNeue-Regular.ttf`, 20_000);
+  if (bebas) fontFiles.push(bebas);
   if (L.font) {
     const extra = await download(L.font.file, L.font.url, 90_000);
     if (extra) fontFiles.push(extra);
     else labels = { pnl: LANGS.en.pnl, initial: LANGS.en.initial }; // font unavailable: fall back to English labels
   }
+  const fontOpts: FontOpts = fontFiles.length
+    ? { fontFiles, loadSystemFonts: false, defaultFontFamily: "Poppins" }
+    : { loadSystemFonts: true };
+  const bannerWidth = p.profitSol ? measure(p.profitSol, bannerSize(p.profitSol), "'Bebas Neue', 'Poppins', sans-serif", 700, fontOpts) : undefined;
+  const initWidth = p.initialBuy ? measure(`${labels.initial}: ${p.initialBuy}`, 40, FONT, 700, fontOpts) : undefined;
   const svg = buildCardSvg({
+    bannerWidth,
+    initWidth,
     title: config.cardTitle,
     tag: p.example ? "EXAMPLE" : config.cardLink,
     frame: await getFrame(),
@@ -159,12 +180,7 @@ export async function renderCard(p: {
     character: await loadLocal("character", 1000),
     background: await loadLocal("background", 1672),
   });
-  const resvg = new Resvg(svg, {
-    fitTo: { mode: "width", value: 1672 },
-    font: fontFiles.length
-      ? { fontFiles, loadSystemFonts: false, defaultFontFamily: "Poppins" }
-      : { loadSystemFonts: true },
-  });
+  const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 1672 }, font: fontOpts });
   return resvg.render().asPng();
 }
 
