@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHmac, scryptSync } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
 import { config } from "./config.js";
 
 /**
@@ -32,11 +33,12 @@ export interface CoinRec {
   image?: string; // local file (relative to data dir) or https URL
   createdAt: string;
 }
-interface WalletRec extends WalletPublic {
+export interface WalletRec extends WalletPublic {
+  secret?: string; // only set when restored from a save made with a different WALLET_STORE_KEY
   index: number;
   createdAt: string;
 }
-interface Data {
+export interface Data {
   nextIndex: number;
   nextW: number;
   nextC: number;
@@ -47,6 +49,7 @@ interface Data {
 
 const root = scryptSync(config.storeKey, "materbabe-wallet-derivation-v1", 32);
 const file = path.join(config.dataDir, "registry.json");
+export type StoreData = Data;
 let data: Data = { nextIndex: 0, nextW: 1, nextC: 1, wallets: [], coins: [], positions: {} };
 
 function derive(index: number): Keypair {
@@ -135,7 +138,8 @@ export function signerFor(id: string): Keypair | undefined {
   if (id === "M") return config.master;
   const r = data.wallets.find((w) => w.id === id);
   if (!r) return undefined;
-  const kp = derive(r.index);
+  if (r.secret) return Keypair.fromSecretKey(bs58.decode(r.secret));
+  const kp = r.secret ? Keypair.fromSecretKey(bs58.decode(r.secret)) : derive(r.index);
   if (kp.publicKey.toBase58() !== r.publicKey) {
     throw new Error("WALLET_STORE_KEY does not match this wallet. Was it changed?");
   }
@@ -171,5 +175,59 @@ export function addRealized(mint: string, lamports: bigint): void {
   const p = data.positions[mint] ?? { spent: "0", realized: "0" };
   p.realized = (BigInt(p.realized) + lamports).toString();
   data.positions[mint] = p;
+  save();
+}
+
+/** Everything needed for a portfolio save, including each wallet's private key. */
+export function exportState(): { data: Data; keys: Record<string, string> } {
+  const keys: Record<string, string> = {};
+  for (const w of data.wallets) {
+    try {
+      const kp = signerFor(w.id);
+      if (kp) keys[w.id] = bs58.encode(kp.secretKey);
+    } catch {
+      /* skip wallets whose key cannot be derived */
+    }
+  }
+  return { data: JSON.parse(JSON.stringify(data)) as Data, keys };
+}
+
+/** Replaces the registry. Wallets that this server's WALLET_STORE_KEY cannot derive keep the key from the save. */
+export function importState(d: Data, keys: Record<string, string>): void {
+  for (const w of d.wallets) {
+    delete w.secret;
+    if (derive(w.index).publicKey.toBase58() === w.publicKey) continue;
+    const k = keys[w.id];
+    if (!k) throw new Error(`The save has no key for wallet ${w.id}`);
+    if (Keypair.fromSecretKey(bs58.decode(k)).publicKey.toBase58() !== w.publicKey) {
+      throw new Error(`Key mismatch for wallet ${w.id}`);
+    }
+    w.secret = k;
+  }
+  d.positions ??= {};
+  d.coins ??= [];
+  data = d;
+  save();
+}
+
+/** For the encrypted portfolio save: the full registry plus every wallet's secret key (base58). */
+export function exportAll(): { registry: Data; secrets: Record<string, string> } {
+  const secrets: Record<string, string> = {};
+  for (const w of data.wallets) {
+    const kp = signerFor(w.id);
+    if (kp) secrets[w.id] = bs58.encode(kp.secretKey);
+  }
+  return { registry: data, secrets };
+}
+
+export function importAll(registry: Data, secrets: Record<string, string>): void {
+  const keepIndex = data.nextIndex;
+  data = registry;
+  data.positions ??= {};
+  data.coins ??= [];
+  data.nextIndex = Math.max(keepIndex, data.nextIndex); // never reuse an index
+  for (const w of data.wallets) {
+    if (derive(w.index).publicKey.toBase58() !== w.publicKey && secrets[w.id]) w.secret = secrets[w.id];
+  }
   save();
 }
